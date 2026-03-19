@@ -1,0 +1,25 @@
+# ============================================================
+#  Crypto News Bot — конфигурация
+# ============================================================
+
+coins:
+  - BTC
+  - ETH
+
+data:
+  news_file: "data/sample_news.csv"
+  prices_file: "data/sample_prices.csv"
+
+model:
+  name: "ElKulako/cryptobert"     # HuggingFace model id
+  inference_latency_ms: 100       # симулируемая задержка инференса (мс)
+  network_latency_ms: 50          # симулируемая сетевая задержка (мс)
+
+trading:
+  initial_capital: 10000.0        # начальный капитал в USD
+  position_size_pct: 0.10         # доля капитала на одну сделку (10 %)
+  buy_threshold: 0.60             # мин. уверенность для BUY
+  sell_threshold: 0.60            # мин. уверенность для SELL
+
+logging:
+  level: "INFO"                   # DEBUG | INFO | WARNING | ERROR
