@@ -110,7 +110,7 @@ class BacktestEngine:
                             status=OrderStatus.FILLED,
                         )
                         pnl = pos.pnl(exit_price)
-                        capital += pos.quantity * exit_price if pos.is_long else pnl
+                        capital += abs(pos.quantity) * pos.avg_entry_price + pnl
                         equity_curve.append(capital)
                         completed_trades.append((entry_order, exit_order))
                         del open_positions[sym]
@@ -200,7 +200,7 @@ class BacktestEngine:
                 status=OrderStatus.FILLED,
             )
             pnl = pos.pnl(exit_price)
-            capital += abs(pos.quantity) * exit_price if pos.is_long else pnl
+            capital += abs(pos.quantity) * pos.avg_entry_price + pnl
             equity_curve.append(capital)
             completed_trades.append((entry_order, exit_order))
 
