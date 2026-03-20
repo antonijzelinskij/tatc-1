@@ -108,17 +108,88 @@ class BacktestReport:
             return 0.0
         return self.winning_trades / self.total_trades
 
+    @property
+    def avg_pnl(self) -> float:
+        if not self.trades:
+            return 0.0
+        return self.total_pnl / len(self.trades)
+
+    @property
+    def max_drawdown(self) -> float:
+        """Максимальная просадка капитала (как доля от пика)."""
+        if not self.trades:
+            return 0.0
+        capital = self.initial_capital
+        peak = capital
+        max_dd = 0.0
+        for t in self.trades:
+            capital += t.pnl
+            if capital > peak:
+                peak = capital
+            dd = (peak - capital) / peak if peak > 0 else 0.0
+            if dd > max_dd:
+                max_dd = dd
+        return max_dd
+
+    @property
+    def avg_confidence(self) -> float:
+        if not self.trades:
+            return 0.0
+        return sum(t.confidence for t in self.trades) / len(self.trades)
+
+    @property
+    def avg_hold_hours(self) -> float:
+        """Среднее время удержания позиции в часах."""
+        closed = [t for t in self.trades if t.exit_timestamp]
+        if not closed:
+            return 0.0
+        durations = [
+            (t.exit_timestamp - t.execution_timestamp).total_seconds() / 3600
+            for t in closed
+        ]
+        return sum(durations) / len(durations)
+
+    def per_coin_summary(self) -> dict[str, dict]:
+        """Статистика по каждой монете."""
+        result: dict[str, dict] = {}
+        for t in self.trades:
+            if t.coin not in result:
+                result[t.coin] = {"trades": 0, "pnl": 0.0, "wins": 0}
+            result[t.coin]["trades"] += 1
+            result[t.coin]["pnl"] += t.pnl
+            if t.pnl > 0:
+                result[t.coin]["wins"] += 1
+        for coin, stats in result.items():
+            n = stats["trades"]
+            stats["win_rate"] = stats["wins"] / n if n > 0 else 0.0
+        return result
+
     def summary(self) -> str:
-        return (
-            f"{'='*55}\n"
-            f"  BACKTEST REPORT\n"
-            f"{'='*55}\n"
-            f"  Total trades   : {self.total_trades}\n"
-            f"  Winning trades : {self.winning_trades}\n"
-            f"  Win rate       : {self.win_rate:.1%}\n"
-            f"  Total PnL      : {self.total_pnl:+.2f} USD\n"
-            f"  Initial capital: {self.initial_capital:.2f} USD\n"
-            f"  Final capital  : {self.final_capital:.2f} USD\n"
-            f"  Return         : {(self.final_capital/self.initial_capital - 1):.2%}\n"
-            f"{'='*55}"
-        )
+        ret = (self.final_capital / self.initial_capital - 1) if self.initial_capital else 0.0
+        lines = [
+            f"{'='*60}",
+            f"  BACKTEST REPORT",
+            f"{'='*60}",
+            f"  Total trades    : {self.total_trades}",
+            f"  Winning trades  : {self.winning_trades}",
+            f"  Win rate        : {self.win_rate:.1%}",
+            f"  Total PnL       : {self.total_pnl:+.2f} USD",
+            f"  Avg PnL/trade   : {self.avg_pnl:+.2f} USD",
+            f"  Max drawdown    : {self.max_drawdown:.1%}",
+            f"  Avg confidence  : {self.avg_confidence:.3f}",
+            f"  Avg hold time   : {self.avg_hold_hours:.1f} h",
+            f"  Initial capital : {self.initial_capital:.2f} USD",
+            f"  Final capital   : {self.final_capital:.2f} USD",
+            f"  Return          : {ret:.2%}",
+        ]
+        per_coin = self.per_coin_summary()
+        if per_coin:
+            lines.append(f"  --- Per coin ---")
+            for coin, stats in sorted(per_coin.items()):
+                lines.append(
+                    f"  {coin:<6} trades={stats['trades']:>4} "
+                    f"pnl={stats['pnl']:>+8.2f} USD  "
+                    f"win={stats['win_rate']:.0%}"
+                )
+        lines.append(f"{'='*60}")
+        return "\n".join(lines)

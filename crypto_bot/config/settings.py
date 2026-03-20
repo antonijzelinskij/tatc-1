@@ -36,6 +36,22 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class KeywordAnalyzerConfig:
+    buy_threshold: float = 0.25
+    sell_threshold: float = 0.25
+    ticker_match_bonus: float = 0.10
+    latency_ms: int = 10
+    extra_bullish_words: tuple = field(default_factory=tuple)
+    extra_bearish_words: tuple = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class EnsembleConfig:
+    strategy: str = "weighted_vote"
+    weights: dict = field(default_factory=lambda: {"cryptobert": 0.65, "keyword": 0.35})
+
+
+@dataclass(frozen=True)
 class TradingConfig:
     initial_capital: float
     position_size_pct: float
@@ -55,6 +71,9 @@ class AppConfig:
     model: ModelConfig
     trading: TradingConfig
     logging: LoggingConfig
+    analyzer: str = "ensemble"
+    keyword_analyzer: KeywordAnalyzerConfig = field(default_factory=KeywordAnalyzerConfig)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -70,12 +89,33 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     with config_path.open("r", encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh)
 
+    # Keyword analyzer config (опционально)
+    kw_raw = raw.get("keyword_analyzer", {})
+    kw_cfg = KeywordAnalyzerConfig(
+        buy_threshold=kw_raw.get("buy_threshold", 0.25),
+        sell_threshold=kw_raw.get("sell_threshold", 0.25),
+        ticker_match_bonus=kw_raw.get("ticker_match_bonus", 0.10),
+        latency_ms=kw_raw.get("latency_ms", 10),
+        extra_bullish_words=tuple(kw_raw.get("extra_bullish_words", [])),
+        extra_bearish_words=tuple(kw_raw.get("extra_bearish_words", [])),
+    )
+
+    # Ensemble config (опционально)
+    ens_raw = raw.get("ensemble", {})
+    ens_cfg = EnsembleConfig(
+        strategy=ens_raw.get("strategy", "weighted_vote"),
+        weights=ens_raw.get("weights", {"cryptobert": 0.65, "keyword": 0.35}),
+    )
+
     cfg = AppConfig(
         coins=raw["coins"],
         data=DataConfig(**raw["data"]),
         model=ModelConfig(**raw["model"]),
         trading=TradingConfig(**raw["trading"]),
         logging=LoggingConfig(**raw["logging"]),
+        analyzer=raw.get("analyzer", "ensemble"),
+        keyword_analyzer=kw_cfg,
+        ensemble=ens_cfg,
     )
 
     # Настраиваем глобальный логгер сразу при загрузке конфига
