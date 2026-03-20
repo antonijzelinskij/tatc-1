@@ -1,27 +1,153 @@
 """
-Real backtest: real news from cryptocurrency.cv + real prices from Bybit.
-No API keys required.
+Real backtest: real news + real prices from HuggingFace (no API keys needed).
+Falls back to cryptocurrency.cv + Bybit if HuggingFace is unavailable.
+
+News:   maryamfakhari/crypto-news-coindesk-2020-2025 (229k articles, 2019–2025)
+Prices: adamzzzz/binance-klines-20240721 (Binance 1h OHLCV, 2020–2024-07)
+
+Caching: data is saved to --cache-dir after first fetch.
+         On subsequent runs, loaded from cache automatically.
+         Use --no-cache to force re-download.
 
 Usage:
-  python real_backtest.py                        # BTC+ETH, Jan-Mar 2024
-  python real_backtest.py --start 2024-01-01 --end 2024-06-01 --coins BTC ETH SOL
-  python real_backtest.py --coins BTC --start 2024-03-01 --end 2024-04-01
+  python real_backtest.py                         # BTC+ETH, Jan-Mar 2024
+  python real_backtest.py --coins BTC ETH SOL --start 2024-01-01 --end 2024-06-01
+  python real_backtest.py --no-cache              # ignore cache, re-download
+  python real_backtest.py --allow-short --hold-candles 12
 """
 import argparse
-import asyncio
-
-import aiohttp
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 from tatc.backtester.engine import BacktestConfig, BacktestEngine
-from tatc.sources.news.cryptocurrencycv import CryptoCurrencyCVSource
-from tatc.sources.price.bybit import BybitPriceSource
+from tatc.core.models import Candle, NewsItem
 from tatc.strategies.sentiment_vader import VaderStrategy
-from tatc import config as cfg
 
 
-async def run(args: argparse.Namespace) -> None:
-    coins = args.coins
+# ──────────────────────────────────────────────────────────────
+# Cache helpers
+# ──────────────────────────────────────────────────────────────
+
+def _news_cache_path(cache_dir: Path, coins: list[str], start: str, end: str) -> Path:
+    coin_str = "_".join(sorted(coins)) if coins else "all"
+    return cache_dir / f"news_{coin_str}_{start}_{end}.json"
+
+
+def _candles_cache_path(cache_dir: Path, symbol: str, interval: str, start: str, end: str) -> Path:
+    return cache_dir / f"candles_{symbol}_{interval}_{start}_{end}.json"
+
+
+def _save_news(path: Path, items: list[NewsItem]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [
+        {
+            "id": it.id, "timestamp": it.timestamp.isoformat(),
+            "title": it.title, "body": it.body,
+            "source": it.source, "url": it.url, "coins": it.coins,
+        }
+        for it in items
+    ]
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _load_news(path: Path) -> list[NewsItem]:
+    data = json.loads(path.read_text())
+    items = []
+    for d in data:
+        ts = datetime.fromisoformat(d["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        items.append(NewsItem(
+            id=d["id"], timestamp=ts, title=d["title"],
+            body=d["body"], source=d["source"], url=d["url"], coins=d["coins"],
+        ))
+    return items
+
+
+def _save_candles(path: Path, candles: list[Candle]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [
+        {
+            "symbol": c.symbol, "timestamp": c.timestamp.isoformat(),
+            "open": c.open, "high": c.high, "low": c.low,
+            "close": c.close, "volume": c.volume,
+        }
+        for c in candles
+    ]
+    path.write_text(json.dumps(data))
+
+
+def _load_candles(path: Path) -> list[Candle]:
+    data = json.loads(path.read_text())
+    candles = []
+    for d in data:
+        ts = datetime.fromisoformat(d["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        candles.append(Candle(
+            symbol=d["symbol"], timestamp=ts,
+            open=d["open"], high=d["high"], low=d["low"],
+            close=d["close"], volume=d["volume"],
+        ))
+    return candles
+
+
+# ──────────────────────────────────────────────────────────────
+# Fetch helpers (HuggingFace primary, cryptocurrency.cv fallback)
+# ──────────────────────────────────────────────────────────────
+
+def fetch_news(coins: list[str], start: str, end: str) -> list[NewsItem]:
+    """Fetch news from HuggingFace (primary) or cryptocurrency.cv (fallback)."""
+    try:
+        from tatc.sources.news.huggingface import fetch_historical
+        items = fetch_historical(start=start, end=end, coins=coins)
+        return items
+    except Exception as e:
+        print(f"  [hf-news] failed ({e}), falling back to cryptocurrency.cv")
+
+    import asyncio
+    import aiohttp
+    from tatc.sources.news.cryptocurrencycv import CryptoCurrencyCVSource
+
+    async def _fetch():
+        async with aiohttp.ClientSession() as session:
+            src = CryptoCurrencyCVSource(session)
+            return await src.fetch_historical(start=start, end=end, coins=coins)
+
+    return asyncio.run(_fetch())
+
+
+def fetch_candles(symbol: str, interval: str, start: str, end: str) -> list[Candle]:
+    """Fetch candles from HuggingFace (primary) or Bybit (fallback)."""
+    try:
+        from tatc.sources.price.huggingface import get_candles
+        return get_candles(symbol=symbol, interval=interval, start=start, end=end)
+    except Exception as e:
+        print(f"  [hf-price] failed ({e}), falling back to Bybit")
+
+    import asyncio
+    import aiohttp
+    from tatc.sources.price.bybit import BybitPriceSource
+
+    async def _fetch():
+        async with aiohttp.ClientSession() as session:
+            src = BybitPriceSource(session)
+            return await src.get_candles(symbol=symbol, interval=interval, start=start, end=end)
+
+    return asyncio.run(_fetch())
+
+
+# ──────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────
+
+def run(args: argparse.Namespace) -> None:
+    coins = [c.upper() for c in args.coins]
     symbols = [f"{c}USDT" for c in coins]
+    cache_dir = Path(args.cache_dir)
+    use_cache = not args.no_cache
 
     print("=" * 58)
     print(f"  TATC Real Backtest")
@@ -29,58 +155,75 @@ async def run(args: argparse.Namespace) -> None:
     print(f"  Coins  : {', '.join(coins)}")
     print(f"  Capital: ${args.capital:,.0f} | Position: {args.position_size*100:.0f}%")
     print(f"  Hold   : {args.hold_candles} candles ({args.interval}m)")
+    print(f"  Cache  : {'OFF (--no-cache)' if args.no_cache else cache_dir}")
     print("=" * 58)
 
-    async with aiohttp.ClientSession() as session:
-        # 1. Fetch historical news
-        print(f"\n[1/3] Fetching news from cryptocurrency.cv...")
-        news_source = CryptoCurrencyCVSource(session)
-        news_items = await news_source.fetch_historical(
-            start=args.start,
-            end=args.end,
-            coins=coins,
-        )
-        print(f"  → {len(news_items)} news items loaded")
+    # ── 1. News ──────────────────────────────────────────────
+    print(f"\n[1/3] Fetching news...")
+    news_path = _news_cache_path(cache_dir, coins, args.start, args.end)
 
-        if not news_items:
-            print("\n  No news found. Try a different date range or coin.")
-            return
+    if use_cache and news_path.exists():
+        news_items = _load_news(news_path)
+        print(f"  → {len(news_items)} news items loaded from cache ({news_path.name})")
+    else:
+        news_items = fetch_news(coins=coins, start=args.start, end=args.end)
+        print(f"  → {len(news_items)} news items fetched")
+        if news_items and use_cache:
+            _save_news(news_path, news_items)
+            print(f"  → saved to cache: {news_path.name}")
 
-        # Show sample
-        print("\n  Sample headlines:")
-        for item in news_items[:5]:
-            print(f"    {item.timestamp.strftime('%Y-%m-%d %H:%M')} "
-                  f"[{','.join(item.coins) or '?'}] {item.title[:60]}")
+    if not news_items:
+        print("\n  No news found. Try a different date range or coin.")
+        return
 
-        # 2. Fetch price candles
-        print(f"\n[2/3] Fetching {args.interval}m candles from Bybit...")
-        price_source = BybitPriceSource(session)
-        candles = {}
-        for sym in symbols:
+    print("\n  Sample headlines:")
+    for item in news_items[:5]:
+        print(f"    {item.timestamp.strftime('%Y-%m-%d %H:%M')} "
+              f"[{','.join(item.coins) or '?'}] {item.title[:60]}")
+
+    # ── 2. Prices ─────────────────────────────────────────────
+    print(f"\n[2/3] Fetching {args.interval}m candles...")
+    candles: dict[str, list[Candle]] = {}
+
+    for sym in symbols:
+        candles_path = _candles_cache_path(cache_dir, sym, args.interval, args.start, args.end)
+
+        if use_cache and candles_path.exists():
+            sym_candles = _load_candles(candles_path)
+            first, last = sym_candles[0], sym_candles[-1]
+            change = (last.close - first.close) / first.close * 100
+            print(f"  → {sym}: {len(sym_candles)} candles from cache "
+                  f"(${first.close:.4g}→${last.close:.4g}, {change:+.1f}%)")
+        else:
             print(f"  → {sym}...", end=" ", flush=True)
             try:
-                sym_candles = await price_source.get_candles(
-                    symbol=sym,
-                    interval=args.interval,
-                    start=args.start,
-                    end=args.end,
+                sym_candles = fetch_candles(
+                    symbol=sym, interval=args.interval,
+                    start=args.start, end=args.end,
                 )
                 if sym_candles:
-                    candles[sym] = sym_candles
                     first, last = sym_candles[0], sym_candles[-1]
                     change = (last.close - first.close) / first.close * 100
                     print(f"{len(sym_candles)} candles, "
                           f"${first.close:.4g}→${last.close:.4g} ({change:+.1f}%)")
+                    if use_cache:
+                        _save_candles(candles_path, sym_candles)
+                        print(f"     saved to cache: {candles_path.name}")
                 else:
                     print("no data")
+                    continue
             except Exception as e:
                 print(f"FAILED: {e}")
+                continue
 
-        if not candles:
-            print("\n  No price data. Check your symbols or date range.")
-            return
+        if sym_candles:
+            candles[sym] = sym_candles
 
-    # 3. Run backtest
+    if not candles:
+        print("\n  No price data. Check your symbols or date range.")
+        return
+
+    # ── 3. Backtest ───────────────────────────────────────────
     strategy = VaderStrategy(
         buy_threshold=args.buy_threshold,
         sell_threshold=args.sell_threshold,
@@ -100,37 +243,43 @@ async def run(args: argparse.Namespace) -> None:
     print(metrics)
 
     # Sentiment breakdown
-    print("\nAll signals generated:")
     signals = strategy.analyze_many(news_items)
     buys  = [s for s in signals if s.signal.value == "BUY"]
     sells = [s for s in signals if s.signal.value == "SELL"]
     holds = [s for s in signals if s.signal.value == "HOLD"]
-    print(f"  BUY: {len(buys)}  SELL: {len(sells)}  HOLD: {len(holds)}")
+    print(f"\nSignals: BUY={len(buys)}  SELL={len(sells)}  HOLD={len(holds)}")
 
     print("\nTop BUY signals:")
     for s in sorted(buys, key=lambda x: -x.confidence)[:5]:
-        print(f"  +{s.confidence:.2f} [{','.join(s.news.coins)}] {s.news.title[:60]}")
+        print(f"  +{s.confidence:.2f} {s.news.timestamp.strftime('%Y-%m-%d')} "
+              f"[{','.join(s.news.coins)}] {s.news.title[:60]}")
     print("Top SELL signals:")
     for s in sorted(sells, key=lambda x: -x.confidence)[:5]:
-        print(f"  -{s.confidence:.2f} [{','.join(s.news.coins)}] {s.news.title[:60]}")
+        print(f"  -{s.confidence:.2f} {s.news.timestamp.strftime('%Y-%m-%d')} "
+              f"[{','.join(s.news.coins)}] {s.news.title[:60]}")
 
 
 def main():
-    p = argparse.ArgumentParser(description="TATC Real Backtest")
+    p = argparse.ArgumentParser(description="TATC Real Backtest (HuggingFace data)")
     p.add_argument("--coins", nargs="+", default=["BTC", "ETH"],
-                   help="Coin codes e.g. BTC ETH SOL DOGE")
+                   help="Coin codes: BTC ETH SOL DOGE etc.")
     p.add_argument("--start", default="2024-01-01")
-    p.add_argument("--end", default="2024-04-01")
-    p.add_argument("--interval", default="60", help="Candle interval minutes: 1,5,15,60,240,D")
-    p.add_argument("--capital", type=float, default=10_000)
+    p.add_argument("--end",   default="2024-04-01")
+    p.add_argument("--interval", default="60",
+                   help="Candle interval in minutes (only 60 supported for HF source)")
+    p.add_argument("--capital",       type=float, default=10_000)
     p.add_argument("--position-size", type=float, default=0.1)
-    p.add_argument("--hold-candles", type=int, default=5)
-    p.add_argument("--min-confidence", type=float, default=0.3)
+    p.add_argument("--hold-candles",  type=int,   default=5)
+    p.add_argument("--min-confidence",type=float, default=0.3)
     p.add_argument("--buy-threshold", type=float, default=0.3)
-    p.add_argument("--sell-threshold", type=float, default=-0.3)
-    p.add_argument("--allow-short", action="store_true")
+    p.add_argument("--sell-threshold",type=float, default=-0.3)
+    p.add_argument("--allow-short",   action="store_true")
+    p.add_argument("--cache-dir",     default="data/cache",
+                   help="Directory for cached news+price data")
+    p.add_argument("--no-cache",      action="store_true",
+                   help="Ignore cache, re-download everything")
     args = p.parse_args()
-    asyncio.run(run(args))
+    run(args)
 
 
 if __name__ == "__main__":
