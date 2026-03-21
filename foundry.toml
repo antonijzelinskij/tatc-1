@@ -1,0 +1,33 @@
+[profile.default]
+src            = "src"
+out            = "out"
+libs           = ["lib"]
+test           = "test"
+script         = "script"
+cache          = true
+cache_path     = "cache"
+optimizer      = true
+optimizer_runs = 1_000_000   # maximise gas efficiency for deployed bytecode
+via_ir         = false        # set true if you hit "stack too deep"
+solc           = "0.8.24"
+evm_version    = "cancun"
+
+# Show logs + traces on failure, gas report always
+verbosity      = 3
+gas_reports    = ["MevExecutor"]
+
+[profile.default.fuzz]
+runs        = 1000
+max_test_rejects = 65536
+
+[profile.ci]
+fuzz = { runs = 5000 }
+
+# ─── RPC Endpoints ────────────────────────────────────────────────────────────
+[rpc_endpoints]
+mainnet  = "${MAINNET_RPC_URL}"
+anvil    = "http://127.0.0.1:8545"
+
+# ─── Etherscan (for verification) ────────────────────────────────────────────
+[etherscan]
+mainnet = { key = "${ETHERSCAN_API_KEY}", url = "https://api.etherscan.io/api" }
