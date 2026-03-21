@@ -154,6 +154,7 @@ def run(args: argparse.Namespace) -> None:
 
     print("=" * 58)
     print(f"  TATC Real Backtest")
+    print(f"  Strategy: {args.strategy.upper()}")
     print(f"  Period : {args.start} → {args.end}")
     print(f"  Coins  : {', '.join(coins)}")
     print(f"  Capital: ${args.capital:,.0f} | Position: {args.position_size*100:.0f}%")
@@ -232,10 +233,17 @@ def run(args: argparse.Namespace) -> None:
         return
 
     # ── 3. Backtest ───────────────────────────────────────────
-    strategy = VaderStrategy(
-        buy_threshold=args.buy_threshold,
-        sell_threshold=args.sell_threshold,
-    )
+    if args.strategy == "finbert":
+        from tatc.strategies.sentiment_finbert import FinBertStrategy
+        strategy = FinBertStrategy(
+            buy_threshold=args.buy_threshold,
+            sell_threshold=args.sell_threshold,
+        )
+    else:
+        strategy = VaderStrategy(
+            buy_threshold=args.buy_threshold,
+            sell_threshold=args.sell_threshold,
+        )
     bt_config = BacktestConfig(
         initial_capital=args.capital,
         position_size_pct=args.position_size,
@@ -298,6 +306,9 @@ def main():
                    help="Directory for cached news+price data")
     p.add_argument("--no-cache",       action="store_true",
                    help="Ignore cache, re-download everything")
+    p.add_argument("--strategy",       default="vader",
+                   choices=["vader", "finbert"],
+                   help="Sentiment strategy: vader (default, fast) or finbert (accurate)")
     args = p.parse_args()
     run(args)
 
