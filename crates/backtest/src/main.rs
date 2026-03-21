@@ -80,6 +80,11 @@ struct Args {
     /// Requires --replay-same-block to be set.
     #[arg(long, default_value = "0")]
     gas_price_gwei: u64,
+
+    /// Only replay txs that interact with the pair or Uniswap routers.
+    /// Much faster than replaying all block txs; still captures price movement.
+    #[arg(long, default_value = "false")]
+    pair_only: bool,
 }
 
 // ─── Contract ABIs ────────────────────────────────────────────────────────────
@@ -303,9 +308,9 @@ async fn run_backtest(args: &Args) -> Result<BacktestResult> {
     } else if args.replay_same_block {
         // Sandwich mode: all txs of target block run AFTER our snipe
         info!("=== SANDWICH MODE: replaying real txs of block {} after our snipe ===", args.block);
-        replay_real_blocks(&provider, &args.rpc_url, args.block, 1).await?
+        replay_real_blocks(&provider, &args.rpc_url, args.block, 1, args.pair_only.then_some(args.pair)).await?
     } else if args.replay_blocks > 0 {
-        replay_real_blocks(&provider, &args.rpc_url, args.block + 1, args.replay_blocks).await?
+        replay_real_blocks(&provider, &args.rpc_url, args.block + 1, args.replay_blocks, args.pair_only.then_some(args.pair)).await?
     } else {
         info!("Mining {} empty blocks ...", args.hold_blocks);
         mine_blocks(&provider, args.hold_blocks).await?;
@@ -395,7 +400,13 @@ async fn replay_real_blocks<P: Provider>(
     rpc_url: &str,
     start_block: u64,
     count: u64,
+    // If Some(pair), only replay txs whose `to` touches pair or Uniswap V2/V3 routers
+    filter_pair: Option<Address>,
 ) -> Result<(u64, u64)> {
+    // Known Uniswap router addresses (lowercase)
+    const V2_ROUTER: &str = "0x7a250d5630b4cf539739df2c5dacb4c659f2488d";
+    const V3_ROUTER: &str = "0xe592427a0aece92de3edee1f18e0157c05861564";
+    const V3_ROUTER2: &str = "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45";
     let http = reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(30))
@@ -424,7 +435,7 @@ async fn replay_real_blocks<P: Provider>(
             .send().await.context("eth_getBlockByNumber send")?
             .json().await.context("eth_getBlockByNumber parse")?;
 
-        let txs = match block_resp["result"]["transactions"].as_array() {
+        let all_txs = match block_resp["result"]["transactions"].as_array() {
             Some(arr) => arr.clone(),
             None => {
                 warn!("Block {block_num}: no transactions");
@@ -432,7 +443,19 @@ async fn replay_real_blocks<P: Provider>(
             }
         };
 
-        info!("Block {block_num}: {} txs", txs.len());
+        // Optionally filter to only txs interacting with the pair or Uniswap routers
+        let txs: Vec<serde_json::Value> = if let Some(pair_addr) = filter_pair {
+            let pair_lc = format!("{pair_addr:?}").to_lowercase();
+            all_txs.into_iter().filter(|tx| {
+                let to = tx["to"].as_str().unwrap_or("").to_lowercase();
+                to == pair_lc || to == V2_ROUTER || to == V3_ROUTER || to == V3_ROUTER2
+            }).collect()
+        } else {
+            all_txs
+        };
+
+        info!("Block {block_num}: {} txs{}", txs.len(),
+            if filter_pair.is_some() { " (pair-filtered)" } else { "" });
 
         // Impersonate all unique senders upfront (batch)
         let senders: std::collections::HashSet<String> = txs.iter()
