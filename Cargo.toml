@@ -7,7 +7,7 @@ members  = [
 
 [workspace.dependencies]
 # Ethereum
-alloy = { version = "0.9", features = [
+alloy = { version = "1.7", features = [
     "full",
     "node-bindings",     # spawn Anvil from Rust
 ] }
@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 eyre    = "0.6"
 thiserror = "1"
-clap      = { version = "4", features = ["derive"] }
+clap      = { version = "4", features = ["derive", "env"] }
 
 [profile.release]
 opt-level = 3
