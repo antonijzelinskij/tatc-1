@@ -77,9 +77,13 @@ class BacktestEngine:
     ) -> BacktestMetrics:
         cfg = self.config
 
-        # When windowing is active, pre-aggregate news into time buckets
+        # When windowing is active, pre-aggregate news into time buckets.
+        # Only create buckets for coins we actually have price data for.
         if cfg.signal_window_hours > 0:
-            effective_news = self._aggregate_news(news_items, cfg.signal_window_hours)
+            tradeable_coins = {sym[:-4] for sym in candles}  # "BTCUSDT" → "BTC"
+            effective_news = self._aggregate_news(
+                news_items, cfg.signal_window_hours, tradeable_coins
+            )
         else:
             effective_news = news_items
 
@@ -272,43 +276,49 @@ class BacktestEngine:
 
     @staticmethod
     def _aggregate_news(
-        news_items: list[NewsItem], window_hours: int
+        news_items: list[NewsItem],
+        window_hours: int,
+        tradeable_coins: set[str] | None = None,
+        max_titles_per_bucket: int = 15,
     ) -> list[NewsItem]:
         """
         Group news into time buckets of `window_hours` hours.
-        Returns one synthetic NewsItem per non-empty bucket, stamped at
-        the bucket's end time, with all titles concatenated.
+        Returns one synthetic NewsItem per non-empty (coin, bucket) pair,
+        stamped at the bucket's end time, with up to `max_titles_per_bucket`
+        titles concatenated for VADER analysis.
+
+        tradeable_coins: if provided, only create buckets for these coins
+                         (avoids processing coins with no price data).
         """
         if not news_items:
             return []
 
-        window = timedelta(hours=window_hours)
+        window_secs = window_hours * 3600
         buckets: dict[tuple, list[NewsItem]] = {}
 
         for item in news_items:
-            # Bucket key = (coin_tuple, floor(ts / window))
             ts_epoch = item.timestamp.timestamp()
-            bucket_start = int(ts_epoch // window.total_seconds())
-            for coin in (item.coins or ["__global__"]):
+            bucket_start = int(ts_epoch // window_secs)
+            coins = item.coins or ["__global__"]
+            for coin in coins:
+                if tradeable_coins and coin != "__global__" and coin not in tradeable_coins:
+                    continue
                 key = (coin, bucket_start)
-                buckets.setdefault(key, []).append(item)
+                bucket = buckets.setdefault(key, [])
+                if len(bucket) < max_titles_per_bucket:
+                    bucket.append(item)
 
         result: list[NewsItem] = []
         for (coin, bucket_start), items in buckets.items():
-            if not items:
-                continue
-            # Bucket timestamp = end of the window (when we'd act)
             bucket_end_ts = datetime.fromtimestamp(
-                (bucket_start + 1) * window.total_seconds(), tz=timezone.utc
+                (bucket_start + 1) * window_secs, tz=timezone.utc
             )
-            # Synthetic item: concatenate titles so VADER can re-analyze the full window
             combined_title = ". ".join(it.title for it in items)
-            combined_body = " ".join(it.body for it in items if it.body)
             synthetic = NewsItem(
                 id=f"agg_{coin}_{bucket_start}",
                 timestamp=bucket_end_ts,
                 title=combined_title,
-                body=combined_body,
+                body="",
                 source="aggregated",
                 url="",
                 coins=[coin] if coin != "__global__" else [],
