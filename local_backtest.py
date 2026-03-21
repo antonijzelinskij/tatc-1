@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from tatc.backtester.engine import BacktestConfig, BacktestEngine
 from tatc.core.models import Candle, NewsItem
 from tatc.strategies.sentiment_vader import VaderStrategy
+from tatc.strategies.combo import ComboStrategy
 from data.news_2024 import NEWS_2024
 
 random.seed(99)
@@ -142,6 +143,7 @@ def run(args):
 
     print("=" * 60)
     print("  TATC Backtest — Real 2024 Events, Synthetic Prices")
+    print(f"  Strategy: {args.strategy.upper()}")
     print(f"  Coins   : {', '.join(coins)}")
     print(f"  Period  : Jan 2024 → Sep 2024")
     print(f"  Capital : ${args.capital:,.0f} | Position: {args.position_size*100:.0f}%")
@@ -173,10 +175,18 @@ def run(args):
     print(f"  {len(news_items)} events for {coins}")
 
     # Sentiment preview
-    strategy = VaderStrategy(
-        buy_threshold=args.buy_threshold,
-        sell_threshold=args.sell_threshold,
-    )
+    if args.strategy == "combo":
+        strategy = ComboStrategy(
+            buy_threshold=args.buy_threshold if args.buy_threshold != 0.3 else 0.45,
+            sell_threshold=args.sell_threshold if args.sell_threshold != -0.3 else -0.45,
+            cooldown_minutes=args.cooldown,
+            dedup_window_minutes=args.dedup_window,
+        )
+    else:
+        strategy = VaderStrategy(
+            buy_threshold=args.buy_threshold,
+            sell_threshold=args.sell_threshold,
+        )
     signals = strategy.analyze_many(news_items)
     n_buy  = sum(1 for s in signals if s.signal.value == "BUY")
     n_sell = sum(1 for s in signals if s.signal.value == "SELL")
@@ -225,6 +235,13 @@ def main():
     p.add_argument("--buy-threshold", type=float, default=0.3)
     p.add_argument("--sell-threshold", type=float, default=-0.3)
     p.add_argument("--allow-short", action="store_true")
+    p.add_argument("--strategy", default="vader",
+                   choices=["vader", "combo"],
+                   help="Sentiment strategy: vader (default) or combo (filtered)")
+    p.add_argument("--cooldown", type=int, default=30,
+                   help="[combo] Per-coin cooldown minutes (default: 30)")
+    p.add_argument("--dedup-window", type=int, default=120,
+                   help="[combo] Duplicate headline suppression window in minutes (default: 120)")
     args = p.parse_args()
     run(args)
 

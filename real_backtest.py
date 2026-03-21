@@ -27,6 +27,7 @@ from pathlib import Path
 from tatc.backtester.engine import BacktestConfig, BacktestEngine
 from tatc.core.models import Candle, NewsItem
 from tatc.strategies.sentiment_vader import VaderStrategy
+from tatc.strategies.combo import ComboStrategy
 
 
 # ──────────────────────────────────────────────────────────────
@@ -239,6 +240,14 @@ def run(args: argparse.Namespace) -> None:
             buy_threshold=args.buy_threshold,
             sell_threshold=args.sell_threshold,
         )
+    elif args.strategy == "combo":
+        strategy = ComboStrategy(
+            buy_threshold=args.buy_threshold if args.buy_threshold != 0.3 else 0.45,
+            sell_threshold=args.sell_threshold if args.sell_threshold != -0.3 else -0.45,
+            cooldown_minutes=args.cooldown,
+            dedup_window_minutes=args.dedup_window,
+            use_finbert=args.combo_finbert,
+        )
     else:
         strategy = VaderStrategy(
             buy_threshold=args.buy_threshold,
@@ -307,8 +316,14 @@ def main():
     p.add_argument("--no-cache",       action="store_true",
                    help="Ignore cache, re-download everything")
     p.add_argument("--strategy",       default="vader",
-                   choices=["vader", "finbert"],
-                   help="Sentiment strategy: vader (default, fast) or finbert (accurate)")
+                   choices=["vader", "finbert", "combo"],
+                   help="Sentiment strategy: vader (fast), finbert (accurate), combo (filtered)")
+    p.add_argument("--cooldown",       type=int,   default=30,
+                   help="[combo] Minutes of silence per coin after a signal (default: 30)")
+    p.add_argument("--dedup-window",   type=int,   default=120,
+                   help="[combo] Minutes to suppress duplicate headlines (default: 120)")
+    p.add_argument("--combo-finbert",  action="store_true",
+                   help="[combo] Also require FinBERT agreement (slower)")
     args = p.parse_args()
     run(args)
 
