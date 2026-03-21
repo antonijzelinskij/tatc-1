@@ -48,6 +48,9 @@ class BacktestConfig:
     signal_window_hours: int = 0        # 0 = per-news; >0 = aggregate over N hours
     leverage: float = 1.0               # 1x = spot; 2x/3x/5x/10x for futures
     maintenance_margin_pct: float = 0.005  # 0.5% maintenance margin (Binance standard)
+    news_exit: bool = False             # if True, SELL signal on open LONG exits it early
+    news_exit_min_confidence: float = 0.0  # min confidence for SELL signal to trigger exit (0 = use min_confidence)
+    news_exit_only_loss: bool = False   # if True, only exit early when position is currently at a loss
 
 
 # Timeline event: either a candle or a news item
@@ -164,6 +167,39 @@ class BacktestEngine:
 
                 sym = signal.symbol
                 if sym not in candles:
+                    continue
+
+                # News-based early exit: SELL signal while holding a LONG → close immediately
+                exit_threshold = cfg.news_exit_min_confidence or cfg.min_confidence
+                if (
+                    cfg.news_exit
+                    and signal.signal == SignalType.SELL
+                    and signal.confidence >= exit_threshold
+                    and sym in open_positions
+                ):
+                    pos, entry_order, held = open_positions[sym]
+                    if pos.is_long:
+                        # Find next candle to get current price for loss check
+                        clist = candles[sym]
+                        idx = candle_idx.get(sym, 0)
+                        while idx < len(clist) and clist[idx].timestamp <= ts:
+                            idx += 1
+                        candle_idx[sym] = idx
+                        if idx < len(clist):
+                            exit_candle = clist[idx]
+                            current_price = exit_candle.open
+                            # If only_loss mode: skip exit if we're currently profitable
+                            if cfg.news_exit_only_loss and current_price > pos.avg_entry_price:
+                                pass  # fall through to "skip if in position"
+                            else:
+                                exit_price = current_price * (1 - cfg.slippage_pct)
+                                capital, exit_order = self._close_position(
+                                    pos, entry_order, exit_price, exit_candle.timestamp,
+                                    capital, cfg,
+                                )
+                                equity_curve.append(capital)
+                                completed_trades.append((entry_order, exit_order))
+                                del open_positions[sym]
                     continue
 
                 # Skip if already in position

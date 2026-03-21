@@ -268,6 +268,9 @@ def run(args: argparse.Namespace) -> None:
         take_profit_pct=args.take_profit,
         signal_window_hours=args.signal_window,
         leverage=args.leverage,
+        news_exit=args.news_exit,
+        news_exit_min_confidence=args.news_exit_confidence,
+        news_exit_only_loss=args.news_exit_only_loss,
     )
 
     print(f"\n[3/3] Running backtest...")
@@ -364,6 +367,12 @@ def main():
     p.add_argument("--leverage",       type=float, default=1.0,
                    help="Futures leverage multiplier (1 = spot, 2/3/5/10 etc). "
                         "Enables liquidation at -(100/leverage)%% from entry.")
+    p.add_argument("--news-exit",      action="store_true",
+                   help="Exit LONG early when a SELL signal arrives during hold period")
+    p.add_argument("--news-exit-confidence", type=float, default=0.0,
+                   help="Min confidence for SELL signal to trigger early exit (0 = same as --min-confidence)")
+    p.add_argument("--news-exit-only-loss", action="store_true",
+                   help="Only exit early if the position is currently at a loss")
     args = p.parse_args()
     run(args)
 
