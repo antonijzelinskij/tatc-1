@@ -193,6 +193,10 @@ def run(args):
     n_hold = sum(1 for s in signals if s.signal.value == "HOLD")
     print(f"  Sentiment: {n_buy} BUY / {n_sell} SELL / {n_hold} HOLD")
 
+    # Reset dedup/cooldown state so the engine starts fresh
+    if hasattr(strategy, "reset"):
+        strategy.reset()
+
     # Run backtest
     config = BacktestConfig(
         initial_capital=args.capital,

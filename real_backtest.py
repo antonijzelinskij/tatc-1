@@ -271,7 +271,9 @@ def run(args: argparse.Namespace) -> None:
     metrics = engine.run(candles, news_items)
     print(metrics)
 
-    # Sentiment breakdown
+    # Sentiment breakdown (reset state so preview is independent of engine run)
+    if hasattr(strategy, "reset"):
+        strategy.reset()
     signals = strategy.analyze_many(news_items)
     buys  = [s for s in signals if s.signal.value == "BUY"]
     sells = [s for s in signals if s.signal.value == "SELL"]

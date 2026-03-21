@@ -313,6 +313,11 @@ class ComboStrategy:
             },
         )
 
+    def reset(self) -> None:
+        """Clear deduplication and cooldown state. Call before each backtest run."""
+        self._seen_hashes.clear()
+        self._coin_last_signal.clear()
+
     def analyze_many(self, news_items: list[NewsItem]) -> list[Signal]:
         """Analyze a list of news items sequentially (order matters for dedup/cooldown)."""
         return [self.analyze(item) for item in news_items]
