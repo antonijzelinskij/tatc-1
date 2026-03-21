@@ -250,6 +250,8 @@ def run(args: argparse.Namespace) -> None:
             cooldown_minutes=args.cooldown,
             dedup_window_minutes=args.dedup_window,
             use_finbert=args.combo_finbert,
+            use_haiku=args.combo_haiku,
+            haiku_threshold=args.haiku_threshold,
         )
     else:
         strategy = VaderStrategy(
@@ -364,6 +366,10 @@ def main():
                    help="[combo] Minutes to suppress duplicate headlines (default: 120)")
     p.add_argument("--combo-finbert",  action="store_true",
                    help="[combo] Also require FinBERT agreement (slower)")
+    p.add_argument("--combo-haiku",    action="store_true",
+                   help="[combo] Also require Claude Haiku agreement (uses API, cached)")
+    p.add_argument("--haiku-threshold", type=float, default=0.6,
+                   help="[combo-haiku] Min Haiku confidence to veto VADER signal (default: 0.6)")
     p.add_argument("--leverage",       type=float, default=1.0,
                    help="Futures leverage multiplier (1 = spot, 2/3/5/10 etc). "
                         "Enables liquidation at -(100/leverage)%% from entry.")

@@ -179,6 +179,10 @@ class ComboStrategy:
         dedup_window_minutes: ignore re-occurrence of same title within N min (default 120)
         use_finbert:          require FinBERT to agree with VADER signal (default False)
         finbert_threshold:    min FinBERT confidence for vote (default 0.55)
+        use_haiku:            require Claude Haiku to agree with VADER signal (default False)
+        haiku_threshold:      min Haiku confidence for vote (default 0.6)
+        haiku_api_key:        Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+        haiku_cache_dir:      directory to cache Haiku results (default: data/cache)
         altcoin_penalty:      if True, raise threshold for high-volatility altcoins (default True)
         default_symbol:       fallback symbol when news.coins is empty
     """
@@ -192,6 +196,10 @@ class ComboStrategy:
         dedup_window_minutes: int = 120,
         use_finbert: bool = False,
         finbert_threshold: float = 0.55,
+        use_haiku: bool = False,
+        haiku_threshold: float = 0.6,
+        haiku_api_key: str | None = None,
+        haiku_cache_dir: str = "data/cache",
         altcoin_penalty: bool = True,
         default_symbol: str = "BTCUSDT",
     ):
@@ -217,6 +225,17 @@ class ComboStrategy:
             self._finbert = FinBertStrategy(
                 buy_threshold=finbert_threshold,
                 sell_threshold=finbert_threshold,
+            )
+
+        # Optional Claude Haiku voter
+        self._haiku: Optional[object] = None
+        self._haiku_threshold = haiku_threshold
+        if use_haiku:
+            from tatc.strategies.sentiment_haiku import ClaudeHaikuStrategy
+            print("  [Haiku] Initializing Claude Haiku voter...", flush=True)
+            self._haiku = ClaudeHaikuStrategy(
+                api_key=haiku_api_key,
+                cache_dir=haiku_cache_dir,
             )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -434,6 +453,14 @@ class ComboStrategy:
             fb = self._finbert.analyze(news)
             if fb.signal != signal_type and abs(adjusted) < _FINBERT_OVERRIDE_THRESHOLD:
                 return self._make_hold(news, f"finbert_veto:{fb.signal.value}", compound)
+
+        # 8. Claude Haiku veto (optional) — Haiku has domain knowledge VADER lacks.
+        #    Unlike FinBERT, Haiku results are cached so repeated runs are free.
+        #    Haiku vetoes the signal only when it disagrees AND its confidence is high.
+        if signal_type != SignalType.HOLD and self._haiku is not None:
+            hk = self._haiku.analyze(news)
+            if hk.signal != signal_type and hk.confidence >= self._haiku_threshold:
+                return self._make_hold(news, f"haiku_veto:{hk.signal.value}:{hk.confidence:.2f}", compound)
 
         confidence = abs(adjusted)
 
