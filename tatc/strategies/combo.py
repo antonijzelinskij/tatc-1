@@ -71,6 +71,30 @@ NOISE_KEYWORDS: frozenset[str] = frozenset({
     "analysts predict", "some analysts",
     "could reach", "might reach",
     "if bitcoin", "could happen",
+    # Recovery/bounce patterns — reliably fail (data-driven: every bounce trade was a loss)
+    "bounces back", "bounce back", "bounced back",
+    "dip buyers", "dip buyer", "buying the dip",
+    "finds support", "finding support", "found support",
+    "recovery rally", "attempts recovery", "attempting recovery",
+    "consolidation phase", "healthy pullback", "healthy correction",
+    "back above", "reclaims",
+})
+
+# "Buy the rumour, sell the news" patterns — event already priced in, price often reverses.
+# When found in a BUY context, apply a strong penalty to prevent chasing the move.
+# Data source: all 5 biggest losses were post-event confirmation articles.
+SELL_THE_NEWS_KEYWORDS: frozenset[str] = frozenset({
+    "profit taking", "profit-taking",
+    "pulls it back", "pulls back", "pulled back",
+    "sell the news", "selling the news",
+    "correction after", "pullback after",
+    "halving complete", "halving successful",
+    "upgrade successful", "upgrade complete", "upgrade live",
+    "etf approval rally", "post-etf", "post-halving",
+    "euphoric after", "euphoria after",
+    "first day trading",
+    "sell-off after", "selloff after",
+    "already surged", "already rallied", "already up",
 })
 
 # Coin full names → ticker for relevance scoring
@@ -90,6 +114,7 @@ _COIN_NAMES: dict[str, str] = {
 _STRONG_KEYWORD_MIN_COMPOUND = 0.15   # compound must cross this even with strong keyword
 _URGENCY_BOOST = 1.2                  # multiply adjusted_compound by this
 _NOISE_PENALTY = 0.4                  # multiply adjusted_compound by this
+_SELL_THE_NEWS_PENALTY = 0.25         # heavy penalty: event already priced in
 _FINBERT_OVERRIDE_THRESHOLD = 0.7    # skip finbert veto if |compound| > this
 
 
@@ -220,6 +245,17 @@ class ComboStrategy:
                 return _URGENCY_BOOST
         return 1.0
 
+    def _sell_the_news_multiplier(self, text: str) -> float:
+        """
+        Detect 'buy the rumour, sell the news' patterns.
+        Returns a heavy penalty multiplier when the article describes a completed
+        event that the market has already reacted to.
+        """
+        for phrase in SELL_THE_NEWS_KEYWORDS:
+            if phrase in text:
+                return _SELL_THE_NEWS_PENALTY
+        return 1.0
+
     def _strong_keyword_signal(self, text: str) -> Optional[SignalType]:
         for phrase in STRONG_BUY_KEYWORDS:
             if phrase in text:
@@ -266,17 +302,22 @@ class ComboStrategy:
         # 5. Apply context multipliers
         noise_mult = self._noise_multiplier(text)
         urgency_mult = self._urgency_multiplier(text)
+        sell_news_mult = self._sell_the_news_multiplier(text)
         relevance_mult = min(relevance, 1.0)  # score above 1.0 has no extra benefit
 
-        adjusted = compound * noise_mult * urgency_mult * relevance_mult
+        adjusted = compound * noise_mult * urgency_mult * sell_news_mult * relevance_mult
         adjusted = max(-1.0, min(1.0, adjusted))  # clamp
 
         # 6. Determine signal type
         strong = self._strong_keyword_signal(text)
 
-        if strong == SignalType.BUY and adjusted >= _STRONG_KEYWORD_MIN_COMPOUND:
+        # Strong keyword override is disabled when sell-the-news is detected
+        # (e.g. "halving complete" has "halving" strong buy but is a sell-the-news)
+        strong_allowed = sell_news_mult == 1.0
+
+        if strong_allowed and strong == SignalType.BUY and adjusted >= _STRONG_KEYWORD_MIN_COMPOUND:
             signal_type = SignalType.BUY
-        elif strong == SignalType.SELL and adjusted <= -_STRONG_KEYWORD_MIN_COMPOUND:
+        elif strong_allowed and strong == SignalType.SELL and adjusted <= -_STRONG_KEYWORD_MIN_COMPOUND:
             signal_type = SignalType.SELL
         elif adjusted >= self.buy_threshold:
             signal_type = SignalType.BUY
@@ -308,6 +349,7 @@ class ComboStrategy:
                 "relevance": relevance,
                 "noise_mult": noise_mult,
                 "urgency_mult": urgency_mult,
+                "sell_news_mult": sell_news_mult,
                 "strong_keyword": strong.value if strong else None,
                 **scores,
             },
