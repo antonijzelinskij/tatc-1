@@ -10,10 +10,13 @@ Caching: data is saved to --cache-dir after first fetch.
          Use --no-cache to force re-download.
 
 Usage:
-  python real_backtest.py                         # BTC+ETH, Jan-Mar 2024
+  python real_backtest.py                                   # BTC+ETH, Jan-Mar 2024
   python real_backtest.py --coins BTC ETH SOL --start 2024-01-01 --end 2024-06-01
-  python real_backtest.py --no-cache              # ignore cache, re-download
+  python real_backtest.py --no-cache                        # ignore cache, re-download
   python real_backtest.py --allow-short --hold-candles 12
+  python real_backtest.py --stop-loss 0.02 --take-profit 0.05  # 2% SL, 5% TP
+  python real_backtest.py --fee 0.001                       # 0.1% fee per leg (default)
+  python real_backtest.py --signal-window 4                 # aggregate news over 4h
 """
 import argparse
 import json
@@ -155,6 +158,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Coins  : {', '.join(coins)}")
     print(f"  Capital: ${args.capital:,.0f} | Position: {args.position_size*100:.0f}%")
     print(f"  Hold   : {args.hold_candles} candles ({args.interval}m)")
+    if args.stop_loss:
+        print(f"  SL/TP  : SL={args.stop_loss*100:.1f}%  TP={args.take_profit*100:.1f}%")
+    print(f"  Fee    : {args.fee*100:.2f}% per leg")
+    if args.signal_window:
+        print(f"  Window : {args.signal_window}h signal aggregation")
     print(f"  Cache  : {'OFF (--no-cache)' if args.no_cache else cache_dir}")
     print("=" * 58)
 
@@ -235,6 +243,10 @@ def run(args: argparse.Namespace) -> None:
         min_confidence=args.min_confidence,
         allow_short=args.allow_short,
         slippage_pct=0.001,
+        fee_pct=args.fee,
+        stop_loss_pct=args.stop_loss,
+        take_profit_pct=args.take_profit,
+        signal_window_hours=args.signal_window,
     )
 
     print(f"\n[3/3] Running backtest...")
@@ -273,10 +285,18 @@ def main():
     p.add_argument("--min-confidence",type=float, default=0.3)
     p.add_argument("--buy-threshold", type=float, default=0.3)
     p.add_argument("--sell-threshold",type=float, default=-0.3)
-    p.add_argument("--allow-short",   action="store_true")
-    p.add_argument("--cache-dir",     default="data/cache",
+    p.add_argument("--allow-short",    action="store_true")
+    p.add_argument("--stop-loss",      type=float, default=0.0,
+                   help="Stop-loss %% per trade, e.g. 0.02 = 2%% (0 = disabled)")
+    p.add_argument("--take-profit",    type=float, default=0.0,
+                   help="Take-profit %% per trade, e.g. 0.05 = 5%% (0 = disabled)")
+    p.add_argument("--fee",            type=float, default=0.001,
+                   help="Exchange fee per leg, default 0.001 = 0.1%%")
+    p.add_argument("--signal-window",  type=int,   default=0,
+                   help="Aggregate news over N hours before trading (0 = per-article)")
+    p.add_argument("--cache-dir",      default="data/cache",
                    help="Directory for cached news+price data")
-    p.add_argument("--no-cache",      action="store_true",
+    p.add_argument("--no-cache",       action="store_true",
                    help="Ignore cache, re-download everything")
     args = p.parse_args()
     run(args)

@@ -6,12 +6,18 @@ Flow:
   2. Merge into a single timeline of events (news or candle)
   3. For each news event → run Strategy → generate Signal
   4. On BUY signal → open position at next candle's open price
-  5. Exit after hold_candles candles (simple exit) or on SELL signal
+  5. Exit after hold_candles candles, on SL/TP hit, or on SELL signal
   6. Track equity curve, compute metrics at end
+
+New in v2:
+  - fee_pct: trading fee applied on both entry and exit legs
+  - stop_loss_pct / take_profit_pct: automatic exits on price triggers
+  - signal_window_hours: aggregate news sentiment over a rolling window
+    instead of reacting to each article individually
 """
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Union
 
 from tatc.backtester.metrics import BacktestMetrics, compute_metrics
@@ -32,10 +38,14 @@ from tatc.core.protocols import Strategy
 class BacktestConfig:
     initial_capital: float = 10_000.0   # USD
     position_size_pct: float = 0.1      # fraction of capital per trade
-    hold_candles: int = 5               # how many candles to hold before force-exit
+    hold_candles: int = 5               # candles to hold before force-exit (0 = no timeout)
     min_confidence: float = 0.0         # skip signals below this confidence
     allow_short: bool = False           # if True, SELL signals open short positions
     slippage_pct: float = 0.001         # 0.1% slippage on fills
+    fee_pct: float = 0.001              # 0.1% fee per leg (entry + exit)
+    stop_loss_pct: float = 0.0          # 0 = disabled, e.g. 0.02 = 2% SL
+    take_profit_pct: float = 0.0        # 0 = disabled, e.g. 0.05 = 5% TP
+    signal_window_hours: int = 0        # 0 = per-news; >0 = aggregate over N hours
 
 
 # Timeline event: either a candle or a news item
@@ -48,7 +58,7 @@ class BacktestEngine:
 
     Usage:
         engine = BacktestEngine(strategy, config)
-        metrics = await engine.run(candles_by_symbol, news_items)
+        metrics = engine.run(candles, news_items)
         print(metrics)
     """
 
@@ -56,31 +66,36 @@ class BacktestEngine:
         self.strategy = strategy
         self.config = config or BacktestConfig()
 
+    # ──────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────
+
     def run(
         self,
         candles: dict[str, list[Candle]],   # symbol → sorted candles
         news_items: list[NewsItem],
     ) -> BacktestMetrics:
-        """
-        Run backtest synchronously (no async needed — data already loaded).
-
-        candles: {symbol: [Candle, ...]} sorted by timestamp
-        news_items: list of NewsItem sorted by timestamp
-        """
         cfg = self.config
+
+        # When windowing is active, pre-aggregate news into time buckets
+        if cfg.signal_window_hours > 0:
+            effective_news = self._aggregate_news(news_items, cfg.signal_window_hours)
+        else:
+            effective_news = news_items
+
         capital = cfg.initial_capital
         equity_curve: list[float] = [capital]
 
-        # Open positions per symbol: symbol → (position, entry_order, candles_held)
+        # Open positions: symbol → (position, entry_order, candles_held)
         open_positions: dict[str, tuple[Position, Order, int]] = {}
         completed_trades: list[tuple[Order, Order]] = []
 
-        # Build per-symbol candle index for quick lookup
+        # Per-symbol candle pointer for "next candle after news" lookup
         candle_idx: dict[str, int] = {sym: 0 for sym in candles}
 
-        # Build unified timeline: (timestamp, type, payload)
+        # Build unified timeline
         timeline: list[tuple[datetime, str, object]] = []
-        for item in news_items:
+        for item in effective_news:
             timeline.append((item.timestamp, "news", item))
         for sym, clist in candles.items():
             for candle in clist:
@@ -88,39 +103,40 @@ class BacktestEngine:
         timeline.sort(key=lambda x: x[0])
 
         for ts, etype, payload in timeline:
+
+            # ── Candle event ──────────────────────────────────────
             if etype == "candle":
                 candle: Candle = payload  # type: ignore
                 sym = candle.symbol
 
-                # Check if we need to exit open position for this symbol
-                if sym in open_positions:
-                    pos, entry_order, held = open_positions[sym]
-                    held += 1
+                if sym not in open_positions:
+                    continue
 
-                    if held >= cfg.hold_candles:
-                        # Force-exit at candle close
+                pos, entry_order, held = open_positions[sym]
+
+                # Check SL / TP before incrementing hold counter
+                exit_price, exit_reason = self._check_sl_tp(pos, candle, cfg)
+
+                if exit_price is None:
+                    held += 1
+                    if cfg.hold_candles > 0 and held >= cfg.hold_candles:
                         exit_price = candle.close * (1 - cfg.slippage_pct)
-                        exit_order = Order(
-                            id=str(uuid.uuid4()),
-                            symbol=sym,
-                            side=OrderSide.SELL if pos.is_long else OrderSide.BUY,
-                            quantity=pos.quantity,
-                            price=exit_price,
-                            timestamp=candle.timestamp,
-                            status=OrderStatus.FILLED,
-                        )
-                        pnl = pos.pnl(exit_price)
-                        capital += abs(pos.quantity) * pos.avg_entry_price + pnl
-                        equity_curve.append(capital)
-                        completed_trades.append((entry_order, exit_order))
-                        del open_positions[sym]
+                        exit_reason = "timeout"
                     else:
                         open_positions[sym] = (pos, entry_order, held)
+                        continue
 
+                # Close position
+                capital, exit_order = self._close_position(
+                    pos, entry_order, exit_price, candle.timestamp, capital, cfg
+                )
+                equity_curve.append(capital)
+                completed_trades.append((entry_order, exit_order))
+                del open_positions[sym]
+
+            # ── News event ────────────────────────────────────────
             elif etype == "news":
                 news: NewsItem = payload  # type: ignore
-
-                # Generate signal
                 signal: Signal = self.strategy.analyze(news)
 
                 if signal.signal == SignalType.HOLD:
@@ -130,9 +146,13 @@ class BacktestEngine:
 
                 sym = signal.symbol
                 if sym not in candles:
-                    continue  # no price data for this symbol
+                    continue
 
-                # Find next available candle for this symbol after news timestamp
+                # Skip if already in position
+                if sym in open_positions:
+                    continue
+
+                # Find next candle after news timestamp
                 clist = candles[sym]
                 idx = candle_idx.get(sym, 0)
                 while idx < len(clist) and clist[idx].timestamp <= ts:
@@ -140,29 +160,27 @@ class BacktestEngine:
                 candle_idx[sym] = idx
 
                 if idx >= len(clist):
-                    continue  # no future candle available
+                    continue
 
                 next_candle = clist[idx]
 
-                # Skip if already in position for this symbol
-                if sym in open_positions:
-                    continue
-
-                # Position sizing
+                # Open position
                 trade_capital = capital * cfg.position_size_pct
                 if trade_capital <= 0:
                     continue
 
-                entry_price = next_candle.open * (1 + cfg.slippage_pct)
-                quantity = trade_capital / entry_price
-
                 if signal.signal == SignalType.BUY:
                     side = OrderSide.BUY
+                    entry_price = next_candle.open * (1 + cfg.slippage_pct)
                 elif signal.signal == SignalType.SELL and cfg.allow_short:
                     side = OrderSide.SELL
                     entry_price = next_candle.open * (1 - cfg.slippage_pct)
                 else:
                     continue
+
+                quantity = trade_capital / entry_price
+                entry_fee = trade_capital * cfg.fee_pct
+                capital -= trade_capital + entry_fee
 
                 entry_order = Order(
                     id=str(uuid.uuid4()),
@@ -180,28 +198,122 @@ class BacktestEngine:
                     avg_entry_price=entry_price,
                     opened_at=next_candle.timestamp,
                 )
-                capital -= trade_capital
                 open_positions[sym] = (position, entry_order, 0)
 
-        # Force-close remaining open positions at last candle price
+        # Force-close remaining open positions at last candle
         for sym, (pos, entry_order, _) in open_positions.items():
             clist = candles.get(sym, [])
             if not clist:
                 continue
-            last_price = clist[-1].close
-            exit_price = last_price * (1 - cfg.slippage_pct)
-            exit_order = Order(
-                id=str(uuid.uuid4()),
-                symbol=sym,
-                side=OrderSide.SELL if pos.is_long else OrderSide.BUY,
-                quantity=abs(pos.quantity),
-                price=exit_price,
-                timestamp=clist[-1].timestamp,
-                status=OrderStatus.FILLED,
+            last_candle = clist[-1]
+            exit_price = last_candle.close * (1 - cfg.slippage_pct)
+            capital, exit_order = self._close_position(
+                pos, entry_order, exit_price, last_candle.timestamp, capital, cfg
             )
-            pnl = pos.pnl(exit_price)
-            capital += abs(pos.quantity) * pos.avg_entry_price + pnl
             equity_curve.append(capital)
             completed_trades.append((entry_order, exit_order))
 
-        return compute_metrics(completed_trades, cfg.initial_capital, equity_curve)
+        return compute_metrics(completed_trades, cfg.initial_capital, equity_curve, candles)
+
+    # ──────────────────────────────────────────────────────────────
+    # Helpers
+    # ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _check_sl_tp(
+        pos: Position, candle: Candle, cfg: BacktestConfig
+    ) -> tuple[float | None, str | None]:
+        """
+        Check if SL or TP was hit during this candle.
+        SL takes priority when both are hit (pessimistic assumption).
+        Returns (exit_price, reason) or (None, None).
+        """
+        if pos.is_long:
+            sl_price = pos.avg_entry_price * (1 - cfg.stop_loss_pct) if cfg.stop_loss_pct > 0 else None
+            tp_price = pos.avg_entry_price * (1 + cfg.take_profit_pct) if cfg.take_profit_pct > 0 else None
+            sl_hit = sl_price is not None and candle.low <= sl_price
+            tp_hit = tp_price is not None and candle.high >= tp_price
+        else:
+            sl_price = pos.avg_entry_price * (1 + cfg.stop_loss_pct) if cfg.stop_loss_pct > 0 else None
+            tp_price = pos.avg_entry_price * (1 - cfg.take_profit_pct) if cfg.take_profit_pct > 0 else None
+            sl_hit = sl_price is not None and candle.high >= sl_price
+            tp_hit = tp_price is not None and candle.low <= tp_price
+
+        if sl_hit:
+            return sl_price, "stop_loss"  # type: ignore[return-value]
+        if tp_hit:
+            return tp_price, "take_profit"  # type: ignore[return-value]
+        return None, None
+
+    @staticmethod
+    def _close_position(
+        pos: Position,
+        entry_order: Order,
+        exit_price: float,
+        exit_ts: datetime,
+        capital: float,
+        cfg: BacktestConfig,
+    ) -> tuple[float, Order]:
+        """Close position, apply fee, return updated capital + exit order."""
+        exit_value = abs(pos.quantity) * exit_price
+        exit_fee = exit_value * cfg.fee_pct
+        capital += exit_value - exit_fee
+
+        exit_order = Order(
+            id=str(uuid.uuid4()),
+            symbol=pos.symbol,
+            side=OrderSide.SELL if pos.is_long else OrderSide.BUY,
+            quantity=abs(pos.quantity),
+            price=exit_price,
+            timestamp=exit_ts,
+            status=OrderStatus.FILLED,
+        )
+        return capital, exit_order
+
+    @staticmethod
+    def _aggregate_news(
+        news_items: list[NewsItem], window_hours: int
+    ) -> list[NewsItem]:
+        """
+        Group news into time buckets of `window_hours` hours.
+        Returns one synthetic NewsItem per non-empty bucket, stamped at
+        the bucket's end time, with all titles concatenated.
+        """
+        if not news_items:
+            return []
+
+        window = timedelta(hours=window_hours)
+        buckets: dict[tuple, list[NewsItem]] = {}
+
+        for item in news_items:
+            # Bucket key = (coin_tuple, floor(ts / window))
+            ts_epoch = item.timestamp.timestamp()
+            bucket_start = int(ts_epoch // window.total_seconds())
+            for coin in (item.coins or ["__global__"]):
+                key = (coin, bucket_start)
+                buckets.setdefault(key, []).append(item)
+
+        result: list[NewsItem] = []
+        for (coin, bucket_start), items in buckets.items():
+            if not items:
+                continue
+            # Bucket timestamp = end of the window (when we'd act)
+            bucket_end_ts = datetime.fromtimestamp(
+                (bucket_start + 1) * window.total_seconds(), tz=timezone.utc
+            )
+            # Synthetic item: concatenate titles so VADER can re-analyze the full window
+            combined_title = ". ".join(it.title for it in items)
+            combined_body = " ".join(it.body for it in items if it.body)
+            synthetic = NewsItem(
+                id=f"agg_{coin}_{bucket_start}",
+                timestamp=bucket_end_ts,
+                title=combined_title,
+                body=combined_body,
+                source="aggregated",
+                url="",
+                coins=[coin] if coin != "__global__" else [],
+            )
+            result.append(synthetic)
+
+        result.sort(key=lambda x: x.timestamp)
+        return result

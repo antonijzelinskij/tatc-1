@@ -4,7 +4,7 @@ Backtesting performance metrics.
 import math
 from dataclasses import dataclass
 
-from tatc.core.models import Order, OrderSide
+from tatc.core.models import Candle, Order, OrderSide
 
 
 @dataclass
@@ -21,8 +21,16 @@ class BacktestMetrics:
     avg_trade_pnl: float
     best_trade_pnl: float
     worst_trade_pnl: float
+    # Buy & Hold benchmark
+    benchmark_pnl: float = 0.0
+    benchmark_pnl_pct: float = 0.0
 
     def __str__(self) -> str:
+        alpha = self.total_pnl_pct - self.benchmark_pnl_pct
+        bh_line = (
+            f"  Buy & Hold:    ${self.benchmark_pnl:+.2f} ({self.benchmark_pnl_pct:+.2f}%)\n"
+            f"  Alpha:         {alpha:+.2f}%\n"
+        )
         return (
             f"\n{'='*40}\n"
             f"  BACKTEST RESULTS\n"
@@ -31,6 +39,7 @@ class BacktestMetrics:
             f"(W:{self.winning_trades} L:{self.losing_trades})\n"
             f"  Win rate:      {self.win_rate*100:.1f}%\n"
             f"  Total PnL:     ${self.total_pnl:+.2f} ({self.total_pnl_pct:+.2f}%)\n"
+            f"{bh_line}"
             f"  Max drawdown:  ${self.max_drawdown:.2f} ({self.max_drawdown_pct:.2f}%)\n"
             f"  Sharpe ratio:  {self.sharpe_ratio:.3f}\n"
             f"  Avg trade:     ${self.avg_trade_pnl:+.2f}\n"
@@ -41,22 +50,31 @@ class BacktestMetrics:
 
 
 def compute_metrics(
-    trades: list[tuple[Order, Order]],  # (buy_order, sell_order) pairs
+    trades: list[tuple[Order, Order]],
     initial_capital: float,
-    equity_curve: list[float],          # equity value at each step
+    equity_curve: list[float],
+    candles: dict[str, list[Candle]] | None = None,
 ) -> BacktestMetrics:
     """
     Compute performance metrics from completed round-trip trades.
 
-    trades: list of (entry_order, exit_order) tuples
-    equity_curve: list of portfolio equity values over time
+    trades:       list of (entry_order, exit_order) tuples
+    equity_curve: portfolio equity values over time
+    candles:      {symbol: [Candle, ...]} — used for buy & hold benchmark
     """
+    # ── Buy & Hold benchmark ──────────────────────────────────────
+    benchmark_pnl = 0.0
+    benchmark_pnl_pct = 0.0
+    if candles:
+        benchmark_pnl, benchmark_pnl_pct = _buy_and_hold(initial_capital, candles)
+
     if not trades:
         return BacktestMetrics(
             total_trades=0, winning_trades=0, losing_trades=0,
             win_rate=0, total_pnl=0, total_pnl_pct=0,
             max_drawdown=0, max_drawdown_pct=0, sharpe_ratio=0,
             avg_trade_pnl=0, best_trade_pnl=0, worst_trade_pnl=0,
+            benchmark_pnl=benchmark_pnl, benchmark_pnl_pct=benchmark_pnl_pct,
         )
 
     pnls: list[float] = []
@@ -71,7 +89,7 @@ def compute_metrics(
     winning = [p for p in pnls if p > 0]
     losing = [p for p in pnls if p <= 0]
 
-    # Max drawdown
+    # ── Max drawdown ─────────────────────────────────────────────
     peak = equity_curve[0] if equity_curve else initial_capital
     max_dd = 0.0
     max_dd_pct = 0.0
@@ -84,7 +102,6 @@ def compute_metrics(
             max_dd = dd
             max_dd_pct = dd_pct
 
-    # Sharpe ratio (daily returns, annualized)
     sharpe = _sharpe(equity_curve)
 
     return BacktestMetrics(
@@ -100,11 +117,40 @@ def compute_metrics(
         avg_trade_pnl=total_pnl / len(trades) if trades else 0,
         best_trade_pnl=max(pnls) if pnls else 0,
         worst_trade_pnl=min(pnls) if pnls else 0,
+        benchmark_pnl=benchmark_pnl,
+        benchmark_pnl_pct=benchmark_pnl_pct,
     )
 
 
+def _buy_and_hold(
+    initial_capital: float, candles: dict[str, list[Candle]]
+) -> tuple[float, float]:
+    """
+    Equal-weight buy & hold across all symbols.
+    Buy at first candle's open, sell at last candle's close.
+    """
+    valid = {sym: clist for sym, clist in candles.items() if clist}
+    if not valid:
+        return 0.0, 0.0
+
+    alloc = initial_capital / len(valid)
+    total_final = 0.0
+    for clist in valid.values():
+        buy_price = clist[0].open
+        sell_price = clist[-1].close
+        if buy_price <= 0:
+            total_final += alloc
+            continue
+        qty = alloc / buy_price
+        total_final += qty * sell_price
+
+    pnl = total_final - initial_capital
+    pnl_pct = pnl / initial_capital * 100
+    return pnl, pnl_pct
+
+
 def _sharpe(equity_curve: list[float], periods_per_year: int = 252) -> float:
-    """Compute annualized Sharpe ratio from equity curve (risk-free = 0)."""
+    """Annualized Sharpe ratio from equity curve (risk-free = 0)."""
     if len(equity_curve) < 2:
         return 0.0
     returns = [
