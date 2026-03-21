@@ -205,6 +205,8 @@ def run(args):
         min_confidence=args.min_confidence,
         allow_short=args.allow_short,
         slippage_pct=0.001,
+        stop_loss_pct=args.stop_loss,
+        take_profit_pct=args.take_profit,
     )
     engine = BacktestEngine(strategy, config)
 
@@ -212,20 +214,66 @@ def run(args):
     metrics = engine.run(candles, news_items)
     print(metrics)
 
-    # Top signals
-    print("\nTop BUY signals:")
-    buy_sigs = sorted([s for s in signals if s.signal.value == "BUY"],
-                      key=lambda x: -x.confidence)
-    for s in buy_sigs[:8]:
-        print(f"  +{s.confidence:.2f} {s.news.timestamp.strftime('%m-%d')} "
-              f"[{','.join(s.news.coins)}] {s.news.title[:58]}")
+    # ── Detailed trade log ────────────────────────────────────────
+    if metrics.trades:
+        wins  = [t for t in metrics.trades if t.pnl > 0]
+        losses = [t for t in metrics.trades if t.pnl <= 0]
 
-    print("\nTop SELL signals:")
-    sell_sigs = sorted([s for s in signals if s.signal.value == "SELL"],
-                       key=lambda x: -x.confidence)
-    for s in sell_sigs[:8]:
-        print(f"  -{s.confidence:.2f} {s.news.timestamp.strftime('%m-%d')} "
-              f"[{','.join(s.news.coins)}] {s.news.title[:58]}")
+        print(f"\n{'─'*70}")
+        print(f"  TRADE LOG  ({len(wins)} wins / {len(losses)} losses)")
+        print(f"{'─'*70}")
+        print(f"  {'#':>3}  {'Date':>10}  {'Sym':>8}  {'Side':>5}  "
+              f"{'Conf':>5}  {'Entry':>9}  {'Exit':>9}  {'PnL%':>6}  {'PnL$':>7}  Headline")
+        print(f"  {'─'*3}  {'─'*10}  {'─'*8}  {'─'*5}  "
+              f"{'─'*5}  {'─'*9}  {'─'*9}  {'─'*6}  {'─'*7}  {'─'*40}")
+
+        for i, t in enumerate(sorted(metrics.trades, key=lambda x: x.entry_ts), 1):
+            result = "WIN " if t.pnl > 0 else "LOSS"
+            meta = t.signal_meta
+            relevance = meta.get("relevance", "")
+            rel_str = f" rel={relevance:.2f}" if relevance != "" else ""
+            adjusted = meta.get("adjusted_compound", "")
+            adj_str = f" adj={adjusted:.2f}" if adjusted != "" else ""
+            noise = meta.get("noise_mult", 1.0)
+            noise_str = " NOISE" if noise < 1.0 else ""
+            strong = meta.get("strong_keyword")
+            strong_str = f" [{strong}]" if strong else ""
+
+            print(f"  {i:>3}  {t.entry_ts.strftime('%m-%d %H:%M')}  "
+                  f"{t.symbol:>8}  {t.side:>5}  "
+                  f"{t.signal_confidence:>5.2f}  "
+                  f"{t.entry_price:>9.4g}  {t.exit_price:>9.4g}  "
+                  f"{t.pnl_pct:>+6.2f}%  {t.pnl:>+7.2f}  "
+                  f"[{result}]{rel_str}{adj_str}{noise_str}{strong_str}")
+            print(f"       News: {t.news_ts.strftime('%m-%d')} {t.news_title[:70]}")
+
+        # ── Loss breakdown ────────────────────────────────────────
+        print(f"\n{'─'*70}")
+        print("  LOSING TRADES ANALYSIS")
+        print(f"{'─'*70}")
+        for t in sorted(losses, key=lambda x: x.pnl):
+            meta = t.signal_meta
+            print(f"  {t.pnl:>+7.2f}$  {t.entry_ts.strftime('%m-%d')}  {t.symbol}  "
+                  f"conf={t.signal_confidence:.2f}  "
+                  f"compound={meta.get('compound', '?'):.3f}  "
+                  f"adj={meta.get('adjusted_compound', meta.get('compound', '?')):.3f}  "
+                  f"rel={meta.get('relevance', '?')}")
+            print(f"           → {t.news_title[:72]}")
+
+        # ── Per-coin summary ──────────────────────────────────────
+        print(f"\n{'─'*70}")
+        print("  PER-COIN SUMMARY")
+        print(f"{'─'*70}")
+        by_coin: dict[str, list] = {}
+        for t in metrics.trades:
+            by_coin.setdefault(t.symbol, []).append(t)
+        for sym, coin_trades in sorted(by_coin.items()):
+            w = sum(1 for t in coin_trades if t.pnl > 0)
+            total_pnl = sum(t.pnl for t in coin_trades)
+            avg_conf = sum(t.signal_confidence for t in coin_trades) / len(coin_trades)
+            print(f"  {sym:>10}  {len(coin_trades):>3} trades  "
+                  f"W:{w} L:{len(coin_trades)-w}  "
+                  f"PnL:{total_pnl:>+8.2f}$  avg_conf={avg_conf:.2f}")
 
 
 def main():
@@ -246,6 +294,10 @@ def main():
                    help="[combo] Per-coin cooldown minutes (default: 30)")
     p.add_argument("--dedup-window", type=int, default=120,
                    help="[combo] Duplicate headline suppression window in minutes (default: 120)")
+    p.add_argument("--stop-loss",   type=float, default=0.0,
+                   help="Stop-loss %% e.g. 0.02 = 2%% (0 = disabled)")
+    p.add_argument("--take-profit", type=float, default=0.0,
+                   help="Take-profit %% e.g. 0.05 = 5%% (0 = disabled)")
     args = p.parse_args()
     run(args)
 

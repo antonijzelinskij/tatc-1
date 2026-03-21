@@ -2,9 +2,29 @@
 Backtesting performance metrics.
 """
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from tatc.core.models import Candle, Order, OrderSide
+
+
+@dataclass
+class TradeRecord:
+    """Full details of one completed round-trip trade."""
+    symbol: str
+    side: str               # "LONG" or "SHORT"
+    entry_price: float
+    exit_price: float
+    pnl: float              # USD
+    pnl_pct: float          # % relative to entry capital
+    entry_ts: datetime
+    exit_ts: datetime
+    hold_hours: float
+    news_title: str
+    news_ts: datetime
+    signal_type: str        # "BUY" or "SELL"
+    signal_confidence: float
+    signal_meta: dict = field(default_factory=dict)  # compound, relevance, etc.
 
 
 @dataclass
@@ -24,6 +44,8 @@ class BacktestMetrics:
     # Buy & Hold benchmark
     benchmark_pnl: float = 0.0
     benchmark_pnl_pct: float = 0.0
+    # Individual trade records (populated when trades have signal info)
+    trades: list[TradeRecord] = field(default_factory=list)
 
     def __str__(self) -> str:
         alpha = self.total_pnl_pct - self.benchmark_pnl_pct
@@ -78,12 +100,35 @@ def compute_metrics(
         )
 
     pnls: list[float] = []
+    trade_records: list[TradeRecord] = []
     for entry, exit_ in trades:
         if entry.side == OrderSide.BUY:
             pnl = (exit_.price - entry.price) * entry.quantity
         else:
             pnl = (entry.price - exit_.price) * entry.quantity
         pnls.append(pnl)
+
+        # Build TradeRecord if signal info available
+        entry_capital = entry.price * entry.quantity
+        hold_hours = (exit_.timestamp - entry.timestamp).total_seconds() / 3600
+        sig = entry.signal
+        if sig is not None:
+            trade_records.append(TradeRecord(
+                symbol=entry.symbol,
+                side="LONG" if entry.side == OrderSide.BUY else "SHORT",
+                entry_price=entry.price,
+                exit_price=exit_.price,
+                pnl=pnl,
+                pnl_pct=pnl / entry_capital * 100 if entry_capital else 0,
+                entry_ts=entry.timestamp,
+                exit_ts=exit_.timestamp,
+                hold_hours=hold_hours,
+                news_title=sig.news.title if sig.news else "",
+                news_ts=sig.news.timestamp if sig.news else entry.timestamp,
+                signal_type=sig.signal.value,
+                signal_confidence=sig.confidence,
+                signal_meta=sig.metadata,
+            ))
 
     total_pnl = sum(pnls)
     winning = [p for p in pnls if p > 0]
@@ -119,6 +164,7 @@ def compute_metrics(
         worst_trade_pnl=min(pnls) if pnls else 0,
         benchmark_pnl=benchmark_pnl,
         benchmark_pnl_pct=benchmark_pnl_pct,
+        trades=trade_records,
     )
 
 
