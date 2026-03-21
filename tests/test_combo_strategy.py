@@ -44,13 +44,13 @@ class TestSignalTypes:
 
     def test_hack_triggers_sell(self):
         s = ComboStrategy()
-        news = _news("Exchange hacked — funds drained", coins=["BTC"])
+        news = _news("Bitcoin exchange hacked — funds drained", coins=["BTC"])
         signal = s.analyze(news)
         assert signal.signal == SignalType.SELL
 
     def test_rug_pull_triggers_sell(self):
         s = ComboStrategy()
-        news = _news("DeFi rug pull confirmed, exit scam exposed", coins=["BTC"])
+        news = _news("Bitcoin DeFi rug pull confirmed, exit scam exposed", coins=["BTC"])
         signal = s.analyze(news)
         assert signal.signal == SignalType.SELL
 

@@ -289,6 +289,37 @@ def run(args: argparse.Namespace) -> None:
         print(f"  -{s.confidence:.2f} {s.news.timestamp.strftime('%Y-%m-%d')} "
               f"[{','.join(s.news.coins)}] {s.news.title[:60]}")
 
+    # ── Trade analysis ────────────────────────────────────────────
+    if metrics.trades:
+        wins   = [t for t in metrics.trades if t.pnl > 0]
+        losses = [t for t in metrics.trades if t.pnl <= 0]
+
+        print(f"\n{'─'*72}")
+        print(f"  LOSING TRADES  ({len(losses)} of {len(metrics.trades)})")
+        print(f"{'─'*72}")
+        for t in sorted(losses, key=lambda x: x.pnl)[:30]:
+            meta = t.signal_meta
+            sn   = meta.get("sell_news_mult", 1.0)
+            nm   = meta.get("noise_mult", 1.0)
+            flag = " [STN]" if sn < 1 else (" [NOISE]" if nm < 1 else "")
+            print(f"  {t.pnl:>+8.2f}$  {t.entry_ts.strftime('%m-%d')}  "
+                  f"{t.symbol:>8}  conf={t.signal_confidence:.2f}"
+                  f"  adj={meta.get('adjusted_compound', 0):.2f}{flag}")
+            print(f"             → {t.news_title[:72]}")
+
+        print(f"\n{'─'*72}")
+        print(f"  PER-COIN SUMMARY")
+        print(f"{'─'*72}")
+        by_coin: dict[str, list] = {}
+        for t in metrics.trades:
+            by_coin.setdefault(t.symbol, []).append(t)
+        for sym, ct in sorted(by_coin.items()):
+            w = sum(1 for t in ct if t.pnl > 0)
+            tp = sum(t.pnl for t in ct)
+            ac = sum(t.signal_confidence for t in ct) / len(ct)
+            print(f"  {sym:>10}  {len(ct):>4} trades  W:{w} L:{len(ct)-w}"
+                  f"  PnL:{tp:>+9.2f}$  avg_conf={ac:.2f}")
+
 
 def main():
     p = argparse.ArgumentParser(description="TATC Real Backtest (HuggingFace data)")

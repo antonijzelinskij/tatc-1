@@ -80,6 +80,31 @@ NOISE_KEYWORDS: frozenset[str] = frozenset({
     "recovery rally", "attempts recovery", "attempting recovery",
     "consolidation phase", "healthy pullback", "healthy correction",
     "back above", "reclaims",
+    # Promotional/clickbait/presale — not actionable market signals
+    "next crypto to explode", "is this the next", "early birds",
+    "promises even greater", "promises huge", "huge returns",
+    "best crypto to buy", "top crypto to buy", "altcoin to buy",
+    "under the radar", "new crypto", "this crypto promises",
+    "deposit dash", "promo code",
+    "draw early", "seeking huge", "volatile dogecoin",
+    "presale", "pre-sale", "airdrop", "x roi", "000x",
+    "alternatives to", "benefits from the", "built on ethereum",
+    # Bearish facts VADER mislabels as positive (real data finding)
+    "blow-off top", "blowoff top",
+    "downside target", "bearish target",
+    "miners sell", "miners selling", "miner sell",
+    "sharp decline in inflows", "inflows falling", "inflows decline",
+    "etf hopes fade", "etf approval hopes fade",
+    "wants to categorize", "security classification",
+    "dethrones", "winning streak against",
+    # Negative outlook phrases VADER fails to catch
+    "remain dim", "remains dim", "odds slump", "approval odds",
+    "warns bitcoin", "warns ethereum", "warns crypto",
+    "will retrace", "deep retrace",
+    "sec investigates", "sec investigation",
+    "whale sells", "whale selling", "whale sold",
+    "surpasses ethereum", "overtakes ethereum",
+    "two rebounds", "massive bounce",
 })
 
 # "Buy the rumour, sell the news" patterns — event already priced in, price often reverses.
@@ -101,6 +126,9 @@ SELL_THE_NEWS_KEYWORDS: frozenset[str] = frozenset({
     "new all-time high", "new ath", "hits ath", "hit ath", "reached ath",
     # Countdown phrases right before a known event — markets price it in, then dump
     "hours away", "days away",
+    # Confirmed-bad events that sound neutral but are bearish
+    "sec wants to classify", "sec classifies", "classified as security",
+    "inflows down", "outflows spike", "etf outflows",
 })
 
 # Regex: article reports an already-completed % move — price clearly moved before we enter.
@@ -159,7 +187,7 @@ class ComboStrategy:
         self,
         buy_threshold: float = 0.45,
         sell_threshold: float = -0.45,
-        min_relevance: float = 0.4,
+        min_relevance: float = 0.75,
         cooldown_minutes: int = 30,
         dedup_window_minutes: int = 120,
         use_finbert: bool = False,
@@ -222,11 +250,15 @@ class ComboStrategy:
     def _relevance_score(self, news: NewsItem) -> float:
         """
         How much is this article actually about the coin(s)?
-          1.0 — coin name/ticker in title
+          1.0 — coin name/ticker is first crypto mentioned in title
+          0.7 — coin name/ticker in title but other coins appear first
           0.8 — coin mentioned 3+ times in body
           0.6 — coin mentioned 1-2 times in body
-          0.4 — coin only in tags (news.coins), not in text
-          0.5 — no coin info at all
+          0.4 — coin only in tags, not in text
+          0.5 — no coin info
+
+        Penalty when another crypto name appears BEFORE the target coin in the title —
+        catches "PEPE and WIF Rally as Bitcoin remains..." (BTC is secondary subject).
         """
         if not news.coins:
             return 0.5
@@ -237,23 +269,39 @@ class ComboStrategy:
 
         best = 0.0
         for coin in news.coins:
-            # Build list of names to check: ticker + full name(s)
             names = [coin.lower()]
             for name, ticker in _COIN_NAMES.items():
                 if ticker == coin.upper():
                     names.append(name)
 
+            title_pos = None
             for name in names:
-                if name in title_lower:
-                    best = max(best, 1.0)
-                    break
-                count = full_text.count(name)
+                idx = title_lower.find(name)
+                if idx != -1:
+                    if title_pos is None or idx < title_pos:
+                        title_pos = idx
+
+            if title_pos is not None:
+                # Check if any OTHER known crypto name appears before our coin in the title
+                other_before = False
+                for other_name, other_ticker in _COIN_NAMES.items():
+                    if other_ticker == coin.upper():
+                        continue
+                    other_idx = title_lower.find(other_name)
+                    if other_idx != -1 and other_idx < title_pos:
+                        other_before = True
+                        break
+                best = max(best, 0.7 if other_before else 1.0)
+            else:
+                count = full_text.count(coin.lower())
+                for name in names[1:]:  # full names only in body check
+                    count = max(count, full_text.count(name))
                 if count >= 3:
                     best = max(best, 0.8)
                 elif count >= 1:
                     best = max(best, 0.6)
-            else:
-                best = max(best, 0.4)
+                else:
+                    best = max(best, 0.4)
 
         return best
 
