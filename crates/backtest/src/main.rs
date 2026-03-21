@@ -168,7 +168,15 @@ async fn run_backtest(args: &Args) -> Result<BacktestResult> {
         args.block
     };
     info!("Spawning Anvil forked at block {} ...", fork_block);
+    // Resolve anvil binary — support both PATH and ~/.foundry/bin
+    let anvil_bin = if std::process::Command::new("anvil").arg("--version").output().is_ok() {
+        "anvil".to_string()
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        format!("{}/.foundry/bin/anvil", home)
+    };
     let anvil = Anvil::new()
+        .path(&anvil_bin)
         .fork(&args.rpc_url)
         .fork_block_number(fork_block)
         .block_time(12u64)
