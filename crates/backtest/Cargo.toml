@@ -19,4 +19,5 @@ dotenvy          = { workspace = true }
 eyre             = { workspace = true }
 thiserror        = { workspace = true }
 clap             = { workspace = true }
+reqwest          = { workspace = true }
 hex              = { workspace = true }
