@@ -37,15 +37,17 @@ from tatc.core.protocols import Strategy
 @dataclass
 class BacktestConfig:
     initial_capital: float = 10_000.0   # USD
-    position_size_pct: float = 0.1      # fraction of capital per trade
+    position_size_pct: float = 0.1      # fraction of capital per trade (= margin fraction)
     hold_candles: int = 5               # candles to hold before force-exit (0 = no timeout)
     min_confidence: float = 0.0         # skip signals below this confidence
     allow_short: bool = False           # if True, SELL signals open short positions
     slippage_pct: float = 0.001         # 0.1% slippage on fills
-    fee_pct: float = 0.001              # 0.1% fee per leg (entry + exit)
-    stop_loss_pct: float = 0.0          # 0 = disabled, e.g. 0.02 = 2% SL
-    take_profit_pct: float = 0.0        # 0 = disabled, e.g. 0.05 = 5% TP
+    fee_pct: float = 0.001              # 0.1% fee per leg on full notional
+    stop_loss_pct: float = 0.0          # 0 = disabled; price % move (e.g. 0.02 = 2% SL)
+    take_profit_pct: float = 0.0        # 0 = disabled; price % move (e.g. 0.05 = 5% TP)
     signal_window_hours: int = 0        # 0 = per-news; >0 = aggregate over N hours
+    leverage: float = 1.0               # 1x = spot; 2x/3x/5x/10x for futures
+    maintenance_margin_pct: float = 0.005  # 0.5% maintenance margin (Binance standard)
 
 
 # Timeline event: either a candle or a news item
@@ -118,6 +120,18 @@ class BacktestEngine:
 
                 pos, entry_order, held = open_positions[sym]
 
+                # Check liquidation first (catastrophic — entire margin lost)
+                liq_price = self._liquidation_price(pos, cfg)
+                if liq_price is not None and self._is_liquidated(pos, candle, liq_price):
+                    capital, exit_order = self._close_position(
+                        pos, entry_order, liq_price, candle.timestamp, capital, cfg,
+                        liquidated=True,
+                    )
+                    equity_curve.append(capital)
+                    completed_trades.append((entry_order, exit_order))
+                    del open_positions[sym]
+                    continue
+
                 # Check SL / TP before incrementing hold counter
                 exit_price, exit_reason = self._check_sl_tp(pos, candle, cfg)
 
@@ -182,9 +196,10 @@ class BacktestEngine:
                 else:
                     continue
 
-                quantity = trade_capital / entry_price
-                entry_fee = trade_capital * cfg.fee_pct
-                capital -= trade_capital + entry_fee
+                notional = trade_capital * cfg.leverage
+                quantity = notional / entry_price
+                entry_fee = notional * cfg.fee_pct
+                capital -= trade_capital + entry_fee  # deduct margin + fee on full notional
 
                 entry_order = Order(
                     id=str(uuid.uuid4()),
@@ -250,6 +265,32 @@ class BacktestEngine:
         return None, None
 
     @staticmethod
+    def _liquidation_price(pos: Position, cfg: BacktestConfig) -> float | None:
+        """
+        Compute the liquidation price for a leveraged position.
+        Returns None for spot (leverage <= 1).
+
+        Long  liq = entry * (1 - 1/leverage + maintenance_margin)
+        Short liq = entry * (1 + 1/leverage - maintenance_margin)
+        """
+        if cfg.leverage <= 1.0:
+            return None
+        ep = pos.avg_entry_price
+        mm = cfg.maintenance_margin_pct
+        if pos.is_long:
+            return ep * (1.0 - 1.0 / cfg.leverage + mm)
+        else:
+            return ep * (1.0 + 1.0 / cfg.leverage - mm)
+
+    @staticmethod
+    def _is_liquidated(pos: Position, candle: Candle, liq_price: float) -> bool:
+        """Returns True if the candle's range touched the liquidation price."""
+        if pos.is_long:
+            return candle.low <= liq_price
+        else:
+            return candle.high >= liq_price
+
+    @staticmethod
     def _close_position(
         pos: Position,
         entry_order: Order,
@@ -257,11 +298,29 @@ class BacktestEngine:
         exit_ts: datetime,
         capital: float,
         cfg: BacktestConfig,
+        liquidated: bool = False,
     ) -> tuple[float, Order]:
-        """Close position, apply fee, return updated capital + exit order."""
-        exit_value = abs(pos.quantity) * exit_price
-        exit_fee = exit_value * cfg.fee_pct
-        capital += exit_value - exit_fee
+        """
+        Close position, apply fee, return updated capital + exit order.
+
+        On liquidation the entire margin is lost — the position's exit_value
+        returns 0 to capital (margin was already deducted at open).
+        """
+        if liquidated:
+            # Margin already deducted at open; exchange keeps everything
+            return_amount = 0.0
+            exit_fee = 0.0
+        else:
+            # Return = margin + PnL (not full notional, since only margin was deducted at open)
+            # margin = notional / leverage = qty * entry / leverage
+            margin = abs(pos.quantity) * pos.avg_entry_price / cfg.leverage
+            if pos.is_long:
+                raw_pnl = (exit_price - pos.avg_entry_price) * abs(pos.quantity)
+            else:
+                raw_pnl = (pos.avg_entry_price - exit_price) * abs(pos.quantity)
+            exit_fee = abs(pos.quantity) * exit_price * cfg.fee_pct
+            return_amount = margin + raw_pnl
+        capital += return_amount - exit_fee
 
         exit_order = Order(
             id=str(uuid.uuid4()),

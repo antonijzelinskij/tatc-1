@@ -160,9 +160,12 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Coins  : {', '.join(coins)}")
     print(f"  Capital: ${args.capital:,.0f} | Position: {args.position_size*100:.0f}%")
     print(f"  Hold   : {args.hold_candles} candles ({args.interval}m)")
+    if args.leverage > 1.0:
+        liq_pct = (1.0 / args.leverage - 0.005) * 100
+        print(f"  Leverage: {args.leverage:.0f}x  (liq at ~{liq_pct:.1f}% adverse move)")
     if args.stop_loss:
         print(f"  SL/TP  : SL={args.stop_loss*100:.1f}%  TP={args.take_profit*100:.1f}%")
-    print(f"  Fee    : {args.fee*100:.2f}% per leg")
+    print(f"  Fee    : {args.fee*100:.2f}% per leg on notional")
     if args.signal_window:
         print(f"  Window : {args.signal_window}h signal aggregation")
     print(f"  Cache  : {'OFF (--no-cache)' if args.no_cache else cache_dir}")
@@ -264,6 +267,7 @@ def run(args: argparse.Namespace) -> None:
         stop_loss_pct=args.stop_loss,
         take_profit_pct=args.take_profit,
         signal_window_hours=args.signal_window,
+        leverage=args.leverage,
     )
 
     print(f"\n[3/3] Running backtest...")
@@ -323,7 +327,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main():
     p = argparse.ArgumentParser(description="TATC Real Backtest (HuggingFace data)")
-    p.add_argument("--coins", nargs="+", default=["BTC", "ETH"],
+    p.add_argument("--coins", nargs="+", default=["BTC", "ETH", "SOL", "BNB"],
                    help="Coin codes: BTC ETH SOL DOGE etc.")
     p.add_argument("--start", default="2024-01-01")
     p.add_argument("--end",   default="2024-04-01")
@@ -357,6 +361,9 @@ def main():
                    help="[combo] Minutes to suppress duplicate headlines (default: 120)")
     p.add_argument("--combo-finbert",  action="store_true",
                    help="[combo] Also require FinBERT agreement (slower)")
+    p.add_argument("--leverage",       type=float, default=1.0,
+                   help="Futures leverage multiplier (1 = spot, 2/3/5/10 etc). "
+                        "Enables liquidation at -(100/leverage)%% from entry.")
     args = p.parse_args()
     run(args)
 

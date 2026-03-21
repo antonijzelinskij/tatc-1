@@ -222,9 +222,28 @@ class ComboStrategy:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _symbol_from_news(self, news: NewsItem) -> str:
-        if news.coins:
-            return f"{news.coins[0]}USDT"
-        return self.default_symbol
+        """
+        Pick the coin that appears earliest in the article title.
+        Falls back to coins[0] if none appear in the title.
+        This prevents always trading BTC when BTC is merely listed alongside
+        the true subject (e.g. "Solana DEX Volume Surpasses Ethereum [BTC,SOL,ETH]").
+        """
+        if not news.coins:
+            return self.default_symbol
+        title_lower = news.title.lower()
+        best_coin = news.coins[0]
+        best_pos: int | None = None
+        for coin in news.coins:
+            names = [coin.lower()]
+            for name, ticker in _COIN_NAMES.items():
+                if ticker == coin.upper():
+                    names.append(name)
+            for name in names:
+                idx = title_lower.find(name)
+                if idx != -1 and (best_pos is None or idx < best_pos):
+                    best_pos = idx
+                    best_coin = coin
+        return f"{best_coin}USDT"
 
     def _title_hash(self, title: str) -> str:
         return hashlib.md5(title.lower().strip().encode()).hexdigest()[:12]
