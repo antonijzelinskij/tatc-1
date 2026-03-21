@@ -8,7 +8,7 @@ cache          = true
 cache_path     = "cache"
 optimizer      = true
 optimizer_runs = 1_000_000   # maximise gas efficiency for deployed bytecode
-via_ir         = false        # set true if you hit "stack too deep"
+via_ir         = true         # needed to avoid "stack too deep" in tests
 solc           = "0.8.24"
 evm_version    = "cancun"
 

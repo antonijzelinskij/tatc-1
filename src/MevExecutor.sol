@@ -69,13 +69,7 @@ contract MevExecutor {
     }
 
     modifier onlyOwner() {
-        assembly {
-            // cheaper than reading the immutable through Solidity's slot system
-            if iszero(eq(caller(), sload(_owner.slot))) {
-                mstore(0x00, 0x82b42900) // Unauthorized()
-                revert(0x1c, 0x04)
-            }
-        }
+        if (msg.sender != _owner) revert Unauthorized();
         _;
     }
 
@@ -337,10 +331,13 @@ contract MevExecutor {
         (uint112 r0, uint112 r1,) = IUniswapV2Pair(pair).getReserves();
         uint256 reserveToken = wethIsToken0 ? uint256(r1) : uint256(r0);
         uint256 reserveWeth  = wethIsToken0 ? uint256(r0) : uint256(r1);
-        uint256 expectedWeth = _getAmountOut(tokenAmount, reserveToken, reserveWeth);
 
-        // Send tokens to pair
+        // Send tokens to pair FIRST, then check actual balance received.
+        // Fee-on-transfer tokens deliver fewer tokens than `tokenAmount`,
+        // so we must use the real balance delta to avoid over-requesting output.
         _safeTransfer(token, pair, tokenAmount);
+        uint256 actualAmountIn = IERC20(token).balanceOf(pair) - reserveToken;
+        uint256 expectedWeth = _getAmountOut(actualAmountIn, reserveToken, reserveWeth);
 
         // Attempt swap (sell tokens → WETH)
         {
