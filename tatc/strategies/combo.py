@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -28,7 +29,9 @@ from tatc.strategies.sentiment_vader import CRYPTO_LEXICON
 
 # ─── Keyword categories ───────────────────────────────────────────────────────
 
-# Major actionable events — lower compound threshold applies when found
+# Major actionable events — lower compound threshold applies when found.
+# NOTE: "ath"/"all-time high" removed — hitting ATH is often a local top (sell-the-news).
+#       "approaching ath", "on track for ath" are bullish but too rare to keyword-match safely.
 STRONG_BUY_KEYWORDS: frozenset[str] = frozenset({
     "halving", "halvening",
     "etf approved", "etf approval", "sec approves", "sec approved",
@@ -36,7 +39,6 @@ STRONG_BUY_KEYWORDS: frozenset[str] = frozenset({
     "listing on binance", "listing on coinbase",
     "partnership", "acquisition", "acquires",
     "blackrock", "fidelity", "microstrategy",
-    "all-time high", "ath",
     "major upgrade", "protocol upgrade", "mainnet launch",
     "institutional", "buys bitcoin", "adds bitcoin",
     "accumulating", "whale accumulation", "record inflows",
@@ -95,7 +97,19 @@ SELL_THE_NEWS_KEYWORDS: frozenset[str] = frozenset({
     "first day trading",
     "sell-off after", "selloff after",
     "already surged", "already rallied", "already up",
+    # New ATH = often local top; "approaching ATH" is fine but "hits/new ATH" is dangerous
+    "new all-time high", "new ath", "hits ath", "hit ath", "reached ath",
+    # Countdown phrases right before a known event — markets price it in, then dump
+    "hours away", "days away",
 })
+
+# Regex: article reports an already-completed % move — price clearly moved before we enter.
+# Catches: "surges 20 percent", "up 80 percent", "gains 15%", "rallied 12 percent", etc.
+_ALREADY_MOVED_RE = re.compile(
+    r"\b(surges?|jumped?|rallied?|soared?|gained?|climbed?|up|rose|skyrocketed?)"
+    r"\s+\d+\s*(%|percent)\b",
+    re.IGNORECASE,
+)
 
 # Coin full names → ticker for relevance scoring
 _COIN_NAMES: dict[str, str] = {
@@ -118,6 +132,13 @@ _SELL_THE_NEWS_PENALTY = 0.25         # heavy penalty: event already priced in
 _FINBERT_OVERRIDE_THRESHOLD = 0.7    # skip finbert veto if |compound| > this
 
 
+# Coins that are high-volatility and poorly predicted by news sentiment alone.
+# Their threshold is boosted by this multiplier (e.g. 0.45 × 1.4 = 0.63 required).
+_ALTCOIN_THRESHOLD_MULTIPLIER = 1.4
+_ALTCOIN_COINS: frozenset[str] = frozenset({"SOL", "DOGE", "SHIB", "PEPE", "FLOKI",
+                                             "BONK", "WIF", "MEME", "TURBO"})
+
+
 class ComboStrategy:
     """
     Combined VADER + keyword filter strategy.
@@ -130,6 +151,7 @@ class ComboStrategy:
         dedup_window_minutes: ignore re-occurrence of same title within N min (default 120)
         use_finbert:          require FinBERT to agree with VADER signal (default False)
         finbert_threshold:    min FinBERT confidence for vote (default 0.55)
+        altcoin_penalty:      if True, raise threshold for high-volatility altcoins (default True)
         default_symbol:       fallback symbol when news.coins is empty
     """
 
@@ -142,6 +164,7 @@ class ComboStrategy:
         dedup_window_minutes: int = 120,
         use_finbert: bool = False,
         finbert_threshold: float = 0.55,
+        altcoin_penalty: bool = True,
         default_symbol: str = "BTCUSDT",
     ):
         self._vader = SentimentIntensityAnalyzer()
@@ -152,6 +175,7 @@ class ComboStrategy:
         self.min_relevance = min_relevance
         self.cooldown_minutes = cooldown_minutes
         self.dedup_window_minutes = dedup_window_minutes
+        self.altcoin_penalty = altcoin_penalty
         self.default_symbol = default_symbol
 
         # Deduplication state (reset between runs)
@@ -250,10 +274,14 @@ class ComboStrategy:
         Detect 'buy the rumour, sell the news' patterns.
         Returns a heavy penalty multiplier when the article describes a completed
         event that the market has already reacted to.
+        Checks both a keyword list and a regex for "surges/up X percent" patterns.
         """
         for phrase in SELL_THE_NEWS_KEYWORDS:
             if phrase in text:
                 return _SELL_THE_NEWS_PENALTY
+        # Regex: article reports an already-completed % gain
+        if _ALREADY_MOVED_RE.search(text):
+            return _SELL_THE_NEWS_PENALTY
         return 1.0
 
     def _strong_keyword_signal(self, text: str) -> Optional[SignalType]:
@@ -308,7 +336,15 @@ class ComboStrategy:
         adjusted = compound * noise_mult * urgency_mult * sell_news_mult * relevance_mult
         adjusted = max(-1.0, min(1.0, adjusted))  # clamp
 
-        # 6. Determine signal type
+        # 6. Altcoin threshold boost — high-volatility coins require stronger signal
+        coin = news.coins[0].upper() if news.coins else ""
+        effective_buy_threshold = self.buy_threshold
+        effective_sell_threshold = self.sell_threshold
+        if self.altcoin_penalty and coin in _ALTCOIN_COINS:
+            effective_buy_threshold = self.buy_threshold * _ALTCOIN_THRESHOLD_MULTIPLIER
+            effective_sell_threshold = self.sell_threshold * _ALTCOIN_THRESHOLD_MULTIPLIER
+
+        # 7. Determine signal type
         strong = self._strong_keyword_signal(text)
 
         # Strong keyword override is disabled when sell-the-news is detected
@@ -319,9 +355,9 @@ class ComboStrategy:
             signal_type = SignalType.BUY
         elif strong_allowed and strong == SignalType.SELL and adjusted <= -_STRONG_KEYWORD_MIN_COMPOUND:
             signal_type = SignalType.SELL
-        elif adjusted >= self.buy_threshold:
+        elif adjusted >= effective_buy_threshold:
             signal_type = SignalType.BUY
-        elif adjusted <= self.sell_threshold:
+        elif adjusted <= effective_sell_threshold:
             signal_type = SignalType.SELL
         else:
             signal_type = SignalType.HOLD
@@ -350,6 +386,7 @@ class ComboStrategy:
                 "noise_mult": noise_mult,
                 "urgency_mult": urgency_mult,
                 "sell_news_mult": sell_news_mult,
+                "altcoin_penalty": coin in _ALTCOIN_COINS,
                 "strong_keyword": strong.value if strong else None,
                 **scores,
             },
