@@ -11,6 +11,7 @@ hash. Re-running the same backtest is free — no API calls repeated.
 Usage:
     strategy = ClaudeHaikuStrategy()                        # standalone
     strategy = ClaudeHaikuStrategy(cache_dir="data/cache")  # custom cache
+    strategy = ClaudeHaikuStrategy(offline=True)            # cache-only, no API calls
 """
 from __future__ import annotations
 
@@ -47,16 +48,23 @@ historical recap, minor news, unclear impact
 - Confidence = how certain you are the market will react to this news
 Output ONLY the JSON. No markdown, no explanation outside the JSON."""
 
+# Sentinel returned for uncached articles in offline mode.
+# confidence=-1 signals "no data" — combo.py will skip the veto.
+_NO_DATA_RESULT: dict = {"signal": "NO_DATA", "confidence": -1.0, "reason": "offline_no_cache"}
+
 
 class ClaudeHaikuStrategy:
     """
     Analyzes news with Claude Haiku via the Anthropic API.
 
     Args:
-        api_key:      Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-        cache_dir:    directory to store the result cache (default: data/cache)
-        max_retries:  API call retries on transient errors
+        api_key:        Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
+        cache_dir:      directory to store the result cache (default: data/cache)
+        max_retries:    API call retries on transient errors
         default_symbol: fallback symbol when news.coins is empty
+        offline:        if True, only use cache; uncached articles return a
+                        NO_DATA pass-through so they bypass the veto entirely.
+                        Useful for testing/backtesting without API quota.
     """
 
     def __init__(
@@ -65,24 +73,28 @@ class ClaudeHaikuStrategy:
         cache_dir: str = "data/cache",
         max_retries: int = 3,
         default_symbol: str = "BTCUSDT",
+        offline: bool = False,
     ):
-        import anthropic
-        from dotenv import load_dotenv  # noqa: F401 — optional, ignored if absent
-
-        try:
-            load_dotenv()
-        except Exception:
-            pass
-
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY not set. Pass api_key= or set the env var."
-            )
-
-        self._client = anthropic.Anthropic(api_key=key)
+        self.offline = offline
         self.default_symbol = default_symbol
         self.max_retries = max_retries
+
+        if not offline:
+            import anthropic
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+            except Exception:
+                pass
+
+            key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY not set. Pass api_key= or set the env var."
+                )
+            self._client = anthropic.Anthropic(api_key=key)
+        else:
+            self._client = None  # type: ignore[assignment]
 
         # Disk cache
         cache_path = Path(cache_dir)
@@ -171,6 +183,9 @@ class ClaudeHaikuStrategy:
         if key in self._cache:
             self._hits += 1
             result = self._cache[key]
+        elif self.offline:
+            # Offline mode: no API call — return pass-through (no veto)
+            result = _NO_DATA_RESULT
         else:
             result = self._call_api(news)
             self._cache[key] = result
@@ -186,6 +201,7 @@ class ClaudeHaikuStrategy:
             "SELL": SignalType.SELL,
             "HOLD": SignalType.HOLD,
         }
+        # NO_DATA maps to HOLD but with confidence=-1 so combo.py can detect it
         signal_type = signal_map.get(raw_signal, SignalType.HOLD)
 
         return Signal(
@@ -225,5 +241,6 @@ class ClaudeHaikuStrategy:
                     f"(API calls: {stats['api_calls_this_session']}, "
                     f"cache hits: {stats['cache_hits_this_session']})"
                 )
-        self.flush_cache()
+        if not self.offline:
+            self.flush_cache()
         return results

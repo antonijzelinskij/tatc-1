@@ -252,6 +252,7 @@ def run(args: argparse.Namespace) -> None:
             use_finbert=args.combo_finbert,
             use_haiku=args.combo_haiku,
             haiku_threshold=args.haiku_threshold,
+            haiku_offline=args.haiku_offline,
         )
     else:
         strategy = VaderStrategy(
@@ -370,6 +371,8 @@ def main():
                    help="[combo] Also require Claude Haiku agreement (uses API, cached)")
     p.add_argument("--haiku-threshold", type=float, default=0.6,
                    help="[combo-haiku] Min Haiku confidence to veto VADER signal (default: 0.6)")
+    p.add_argument("--haiku-offline",  action="store_true",
+                   help="[combo-haiku] Cache-only mode: skip API calls, veto only cached articles")
     p.add_argument("--leverage",       type=float, default=1.0,
                    help="Futures leverage multiplier (1 = spot, 2/3/5/10 etc). "
                         "Enables liquidation at -(100/leverage)%% from entry.")
