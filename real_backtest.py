@@ -168,6 +168,10 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Fee    : {args.fee*100:.2f}% per leg on notional")
     if args.signal_window:
         print(f"  Window : {args.signal_window}h signal aggregation")
+    if args.confidence_sizing:
+        print(f"  Sizing : confidence-based (0.5x–1.0x of position size)")
+    if args.trend_filter:
+        print(f"  Trend  : SMA{args.trend_sma_period} filter (longs only above SMA)")
     print(f"  Cache  : {'OFF (--no-cache)' if args.no_cache else cache_dir}")
     print("=" * 58)
 
@@ -253,6 +257,7 @@ def run(args: argparse.Namespace) -> None:
             use_haiku=args.combo_haiku,
             haiku_threshold=args.haiku_threshold,
             haiku_offline=args.haiku_offline,
+            max_neu=args.max_neu,
         )
     else:
         strategy = VaderStrategy(
@@ -274,6 +279,9 @@ def run(args: argparse.Namespace) -> None:
         news_exit=args.news_exit,
         news_exit_min_confidence=args.news_exit_confidence,
         news_exit_only_loss=args.news_exit_only_loss,
+        confidence_sizing=args.confidence_sizing,
+        trend_filter=args.trend_filter,
+        trend_sma_period=args.trend_sma_period,
     )
 
     print(f"\n[3/3] Running backtest...")
@@ -382,6 +390,14 @@ def main():
                    help="Min confidence for SELL signal to trigger early exit (0 = same as --min-confidence)")
     p.add_argument("--news-exit-only-loss", action="store_true",
                    help="Only exit early if the position is currently at a loss")
+    p.add_argument("--max-neu",            type=float, default=0.85,
+                   help="[combo] Filter signals with VADER neu score above this (0=disable, default 0.85)")
+    p.add_argument("--confidence-sizing",  action="store_true",
+                   help="Scale position size by signal confidence (0.5x–1.0x of base size)")
+    p.add_argument("--trend-filter",       action="store_true",
+                   help="Skip longs when price is below SMA (trend filter)")
+    p.add_argument("--trend-sma-period",   type=int, default=20,
+                   help="Candle lookback for trend SMA (default: 20)")
     args = p.parse_args()
     run(args)
 

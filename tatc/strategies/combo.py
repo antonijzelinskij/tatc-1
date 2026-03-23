@@ -153,7 +153,7 @@ _COIN_NAMES: dict[str, str] = {
 }
 
 # Tuning constants
-_STRONG_KEYWORD_MIN_COMPOUND = 0.15   # compound must cross this even with strong keyword
+_STRONG_KEYWORD_MIN_COMPOUND = 0.25   # compound must cross this even with strong keyword
 _URGENCY_BOOST = 1.2                  # multiply adjusted_compound by this
 _NOISE_PENALTY = 0.4                  # multiply adjusted_compound by this
 _SELL_THE_NEWS_PENALTY = 0.25         # heavy penalty: event already priced in
@@ -186,6 +186,8 @@ class ComboStrategy:
         haiku_api_key:        Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
         haiku_cache_dir:      directory to cache Haiku results (default: data/cache)
         altcoin_penalty:      if True, raise threshold for high-volatility altcoins (default True)
+        max_neu:              VADER neu score above this → apply penalty (0=disable, default 0.85)
+                              High neu means mostly neutral/ambiguous text → weaker signal.
         default_symbol:       fallback symbol when news.coins is empty
     """
 
@@ -204,6 +206,7 @@ class ComboStrategy:
         haiku_api_key: str | None = None,
         haiku_cache_dir: str = "data/cache",
         altcoin_penalty: bool = True,
+        max_neu: float = 0.85,
         default_symbol: str = "BTCUSDT",
     ):
         self._vader = SentimentIntensityAnalyzer()
@@ -215,6 +218,7 @@ class ComboStrategy:
         self.cooldown_minutes = cooldown_minutes
         self.dedup_window_minutes = dedup_window_minutes
         self.altcoin_penalty = altcoin_penalty
+        self.max_neu = max_neu
         self.default_symbol = default_symbol
 
         # Deduplication state (reset between runs)
@@ -424,7 +428,15 @@ class ComboStrategy:
         sell_news_mult = self._sell_the_news_multiplier(text)
         relevance_mult = min(relevance, 1.0)  # score above 1.0 has no extra benefit
 
-        adjusted = compound * noise_mult * urgency_mult * sell_news_mult * relevance_mult
+        # Neutrality penalty: high VADER neu score → text is mostly factual/ambiguous →
+        # signal is unreliable. Linearly reduce signal strength above max_neu.
+        neu = scores["neu"]
+        if self.max_neu > 0 and neu > self.max_neu:
+            neu_mult = max(0.3, 1.0 - (neu - self.max_neu) * 4.0)
+        else:
+            neu_mult = 1.0
+
+        adjusted = compound * noise_mult * urgency_mult * sell_news_mult * relevance_mult * neu_mult
         adjusted = max(-1.0, min(1.0, adjusted))  # clamp
 
         # 6. Altcoin threshold boost — high-volatility coins require stronger signal
@@ -491,6 +503,7 @@ class ComboStrategy:
                 "noise_mult": noise_mult,
                 "urgency_mult": urgency_mult,
                 "sell_news_mult": sell_news_mult,
+                "neu_mult": neu_mult,
                 "altcoin_penalty": coin in _ALTCOIN_COINS,
                 "strong_keyword": strong.value if strong else None,
                 **scores,

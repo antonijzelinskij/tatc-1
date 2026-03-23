@@ -51,6 +51,9 @@ class BacktestConfig:
     news_exit: bool = False             # if True, SELL signal on open LONG exits it early
     news_exit_min_confidence: float = 0.0  # min confidence for SELL signal to trigger exit (0 = use min_confidence)
     news_exit_only_loss: bool = False   # if True, only exit early when position is currently at a loss
+    confidence_sizing: bool = False     # scale position size by signal confidence (0.5x–1.0x of base)
+    trend_filter: bool = False          # only open longs when price > SMA(trend_sma_period)
+    trend_sma_period: int = 20          # number of candles for trend SMA
 
 
 # Timeline event: either a candle or a news item
@@ -218,8 +221,23 @@ class BacktestEngine:
 
                 next_candle = clist[idx]
 
+                # Trend filter: skip longs when price is below SMA (downtrend)
+                if (
+                    cfg.trend_filter
+                    and signal.signal == SignalType.BUY
+                    and idx >= cfg.trend_sma_period
+                ):
+                    recent = clist[idx - cfg.trend_sma_period:idx]
+                    sma = sum(c.close for c in recent) / cfg.trend_sma_period
+                    if next_candle.open < sma:
+                        continue
+
                 # Open position
-                trade_capital = capital * cfg.position_size_pct
+                if cfg.confidence_sizing:
+                    size_factor = 0.5 + min(signal.confidence, 1.0) * 0.5
+                else:
+                    size_factor = 1.0
+                trade_capital = capital * cfg.position_size_pct * size_factor
                 if trade_capital <= 0:
                     continue
 
