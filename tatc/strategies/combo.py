@@ -129,6 +129,14 @@ SELL_THE_NEWS_KEYWORDS: frozenset[str] = frozenset({
     # Confirmed-bad events that sound neutral but are bearish
     "sec wants to classify", "sec classifies", "classified as security",
     "inflows down", "outflows spike", "etf outflows",
+    # Sentiment at peak → market has no more buyers left (research: every extreme-greed article
+    # in Q1 2024 preceded a dump within 4h)
+    "extreme greed",
+    "greed index",
+    # Macro bearish data — hot CPI/inflation causes risk-off selling (data: Mar-14 dump -3.5%)
+    "cpi comes in hot", "cpi data hot", "inflation comes in hot",
+    "inflation data hot", "hotter than expected inflation", "hotter-than-expected cpi",
+    "inflation exceeds", "cpi exceeds",
 })
 
 # Regex: article reports an already-completed % move — price clearly moved before we enter.
@@ -138,6 +146,35 @@ _ALREADY_MOVED_RE = re.compile(
     r"\s+\d+\s*(%|percent)\b",
     re.IGNORECASE,
 )
+
+# Contrarian BUY: mass liquidation cascade signals forced selling is done → price tends to recover.
+# Research finding: every $200M+ liquidation event in Q1-Q2 2024 preceded a bounce within 4h
+# EXCEPT during sustained geopolitical bear moves (Iran-Israel Apr-13).
+# Guard: only fires when noise_mult==1.0 (real event, not prediction) and sell_news_mult==1.0
+# (not already bounced).
+CONTRARIAN_BUY_KEYWORDS: frozenset[str] = frozenset({
+    # Only very specific terms — generic ones ("max pain", "short squeeze", "capitulation")
+    # generate too many false positives on prediction/analysis articles.
+    "liquidation cascade",
+})
+
+# Regex: mass liquidation event — requires large dollar amounts ($200M+ or any billions).
+# Rationale: small liquidations ($7M–$50M) are routine, NOT predictive of a local bottom.
+# Only $200M+ events reliably signal forced selling at scale → local bottom.
+# Matches both orderings: "$500M in liquidations" / "liquidations near $500 million".
+# 3+ digit integer part before "million" means >= $100M minimum.
+_MASS_LIQUIDATION_RE = re.compile(
+    r"(?:"
+    r"\$\d{3,}[\d,.]*\s*(?:million|m)\b.{0,50}liquidation"         # $200M+ ... liquidation
+    r"|\$[\d,.]+\s*(?:billion|b)\b.{0,50}liquidation"              # $X billion ... liquidation
+    r"|liquidation.{0,50}\$\d{3,}[\d,.]*\s*(?:million|m)\b"        # liquidation ... $200M+
+    r"|liquidation.{0,50}\$[\d,.]+\s*(?:billion|b)\b"              # liquidation ... $X billion
+    r")",
+    re.IGNORECASE,
+)
+
+# Confidence assigned to contrarian buy signals (moderate — signal is reliable but not perfect)
+_CONTRARIAN_BUY_CONFIDENCE = 0.55
 
 # Coin full names → ticker for relevance scoring
 _COIN_NAMES: dict[str, str] = {
@@ -364,6 +401,30 @@ class ComboStrategy:
                 return _URGENCY_BOOST
         return 1.0
 
+    # Phrases that indicate a FUTURE/HYPOTHETICAL liquidation (not a real event).
+    # When present, the contrarian buy is suppressed.
+    _FUTURE_LIQUIDATION_RE = re.compile(
+        r"\b(at risk of|could trigger|threatens|threat|if .{0,25}liquidat"
+        r"|risk of liquidat|exposes .{0,25}liquidat|warns of)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_contrarian_buy(self, text: str) -> bool:
+        """
+        Returns True when the article describes a mass liquidation cascade or capitulation event.
+        These are contrarian BUY signals: forced selling is done → price tends to recover.
+        Only reliable for concrete, already-happened events — not predictions or warnings.
+        """
+        # Check for future/hypothetical framing first — those are NOT contrarian buy signals
+        if self._FUTURE_LIQUIDATION_RE.search(text):
+            return False
+        if _MASS_LIQUIDATION_RE.search(text):
+            return True
+        for phrase in CONTRARIAN_BUY_KEYWORDS:
+            if phrase in text:
+                return True
+        return False
+
     def _sell_the_news_multiplier(self, text: str) -> float:
         """
         Detect 'buy the rumour, sell the news' patterns.
@@ -439,6 +500,15 @@ class ComboStrategy:
         adjusted = compound * noise_mult * urgency_mult * sell_news_mult * relevance_mult * neu_mult
         adjusted = max(-1.0, min(1.0, adjusted))  # clamp
 
+        # 5a. Contrarian BUY override: mass liquidation / capitulation detected.
+        # Forced selling = potential local bottom. Override VADER's negative reading.
+        # Guards: noise_mult==1 (real event, not a prediction) AND
+        #         sell_news_mult==1 (price hasn't already bounced off the liquidation).
+        if (self._is_contrarian_buy(text)
+                and noise_mult == 1.0
+                and sell_news_mult == 1.0):
+            adjusted = max(adjusted, _CONTRARIAN_BUY_CONFIDENCE)
+
         # 6. Altcoin threshold boost — high-volatility coins require stronger signal
         coin = news.coins[0].upper() if news.coins else ""
         effective_buy_threshold = self.buy_threshold
@@ -490,6 +560,7 @@ class ComboStrategy:
         if signal_type != SignalType.HOLD:
             self._mark_signal(symbol, news.timestamp)
 
+        contrarian = self._is_contrarian_buy(text)
         return Signal(
             signal=signal_type,
             confidence=confidence,
@@ -506,6 +577,7 @@ class ComboStrategy:
                 "neu_mult": neu_mult,
                 "altcoin_penalty": coin in _ALTCOIN_COINS,
                 "strong_keyword": strong.value if strong else None,
+                "contrarian_buy": contrarian,
                 **scores,
             },
         )
